@@ -170,6 +170,13 @@ class FxTitleBar(QWidget):
         self.btn_max.setToolTip("Maximize / Restore")
         self.btn_max.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 6px; } QPushButton:hover { background: rgba(255,255,255,0.08); }")
         self.btn_max.clicked.connect(self._toggle_maximize)
+        self.btn_full = QPushButton()
+        self.btn_full.setIcon(get_svg_icon("fullscreen", color="#b1b1b1"))
+        self.btn_full.setIconSize(QSize(14, 14))
+        self.btn_full.setFixedSize(32, 26)
+        self.btn_full.setToolTip("Full Screen (F11)")
+        self.btn_full.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 6px; } QPushButton:hover { background: rgba(255,255,255,0.08); }")
+        self.btn_full.clicked.connect(self._win.toggleFullscreen)
         self.btn_close = QPushButton()
         self.btn_close.setIcon(get_svg_icon("close", color="#b1b1b1"))
         self.btn_close.setIconSize(QSize(14, 14))
@@ -179,6 +186,7 @@ class FxTitleBar(QWidget):
         self.btn_close.clicked.connect(self._win.close)
         lay.addWidget(self.btn_min)
         lay.addWidget(self.btn_max)
+        lay.addWidget(self.btn_full)
         lay.addWidget(self.btn_close)
 
     def _toggle_maximize(self):
@@ -212,6 +220,10 @@ class FxTitleBar(QWidget):
         self.btn_back.setIcon(get_svg_icon("arrow-left", color=icon_c))
         self.btn_min.setIcon(get_svg_icon("minimize", color=icon_c))
         self.btn_max.setIcon(get_svg_icon("maximize", color=icon_c))
+        # fullscreen icon reflects current state
+        is_fs = self._win.isFullScreen()
+        self.btn_full.setIcon(get_svg_icon("fullscreen-exit" if is_fs else "fullscreen", color=icon_c))
+        self.btn_full.setToolTip("Exit Full Screen (F11/Esc)" if is_fs else "Full Screen (F11)")
         self.btn_close.setIcon(get_svg_icon("close", color=icon_c))
 
     def mousePressEvent(self, event):
@@ -559,13 +571,23 @@ class FreqCheckerApp(QMainWindow):
         vis_header.addWidget(lbl_vis_desc)
         vis_layout.addLayout(vis_header)
         
-        self.top_visualizer = FxSpectrumVisualizerWidget(height=68)
+        self.top_visualizer = FxSpectrumVisualizerWidget(height=78)
         self.top_visualizer.set_provider(self._get_spectrum_values)
         # more FxSound-like: subtle inner glow via stylesheet on the custom widget is painted, so keep transparent wrapper
         self.top_visualizer.setStyleSheet("background: transparent; border: none;")
         vis_layout.addWidget(self.top_visualizer)
         n_layout.addWidget(vis_container, 1)
         n_layout.addStretch()
+
+        # Full Screen — prominent so user finds it (was missing)
+        self.btn_nav_full = QPushButton()
+        self.btn_nav_full.setIcon(get_svg_icon("fullscreen", color="#b1b1b1"))
+        self.btn_nav_full.setIconSize(QSize(16, 16))
+        self.btn_nav_full.setFixedSize(34, 34)
+        self.btn_nav_full.setToolTip("Full Screen (F11)")
+        self.btn_nav_full.setStyleSheet("QPushButton { background: rgba(255,255,255,0.06); border: 1px solid #2b2b2b; border-radius: 8px; } QPushButton:hover { background: rgba(255,255,255,0.10); border-color:#3a3a3a; }")
+        self.btn_nav_full.clicked.connect(self.toggleFullscreen)
+        n_layout.addWidget(self.btn_nav_full)
         
         # Theme Switcher Button with SVG Icon
         self.btn_theme_toggle = QPushButton("Dark Mode")
@@ -608,6 +630,12 @@ class FreqCheckerApp(QMainWindow):
             self._title_bar.update_theme(self.is_dark_theme)
             # frameless container border
             self._frame_container.setStyleSheet(f"QFrame#FramelessContainer {{ background-color: {'#181818' if self.is_dark_theme else '#f5f5f5'}; border: 1px solid {'#2b2b2b' if self.is_dark_theme else '#d9d9d9'}; border-radius: 12px; }}")
+        # nav fullscreen icon follows theme + fullscreen state
+        if hasattr(self, "btn_nav_full"):
+            is_fs = self.isFullScreen()
+            icon = "fullscreen-exit" if is_fs else "fullscreen"
+            col = "#b1b1b1" if self.is_dark_theme else "#5a5a5a"
+            self.btn_nav_full.setIcon(get_svg_icon(icon, color=col))
         self.live_plot.set_theme(self.is_dark_theme)
         self.results_plot.set_theme(self.is_dark_theme)
         self._update_channel_badge()
@@ -686,6 +714,23 @@ class FreqCheckerApp(QMainWindow):
             self._title_bar.btn_back.setEnabled(has_back)
             self._title_bar.btn_back.setToolTip("Back" if has_back else "Already on Home")
 
+    def toggleFullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        # refresh all fullscreen icons (title bar + nav)
+        is_fs = self.isFullScreen()
+        icon = "fullscreen-exit" if is_fs else "fullscreen"
+        col = "#b1b1b1" if self.is_dark_theme else "#5a5a5a"
+        tip = "Exit Full Screen (F11/Esc)" if is_fs else "Full Screen (F11)"
+        if hasattr(self, "_title_bar") and hasattr(self._title_bar, "btn_full"):
+            self._title_bar.btn_full.setIcon(get_svg_icon(icon, color=col))
+            self._title_bar.btn_full.setToolTip(tip)
+        if hasattr(self, "btn_nav_full"):
+            self.btn_nav_full.setIcon(get_svg_icon(icon, color=col))
+            self.btn_nav_full.setToolTip(tip)
+
     def _on_playback_started_ui(self, freq_hz: float = 1000.0):
         self._active_tone_freq = freq_hz
         self.btn_replay.setEnabled(False)
@@ -728,10 +773,17 @@ class FreqCheckerApp(QMainWindow):
         QShortcut(QKeySequence("N"), self, self._on_shortcut_no)
         QShortcut(QKeySequence("R"), self, self._on_shortcut_r)
         QShortcut(QKeySequence("Z"), self, self._on_shortcut_z)
-        QShortcut(QKeySequence(Qt.Key_Escape), self, self._stop_current_test)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, self._handle_esc)
+        QShortcut(QKeySequence("F11"), self, self.toggleFullscreen)
         QShortcut(QKeySequence("T"), self, lambda: self._submit_with(True, 10))
         for i in range(10):
             QShortcut(QKeySequence(str(i)), self, lambda val=i: self._submit_with(True, val))
+
+    def _handle_esc(self):
+        if self.isFullScreen():
+            self.toggleFullscreen()
+        else:
+            self._stop_current_test()
 
     def _on_shortcut_z(self):
         if self.stack.currentIndex() == PAGE_TESTING:

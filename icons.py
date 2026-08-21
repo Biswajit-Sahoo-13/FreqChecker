@@ -56,6 +56,16 @@ SVG_ICONS: Dict[str, str] = {
         '<line x1="7" y1="7" x2="17" y2="17"/><line x1="17" y1="7" x2="7" y2="17"/>', 2.0
     ),
     "maximize": _stroke('<rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/>', 2.0),
+    "fullscreen": _stroke(
+        '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>'
+        '<line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
+        2.0,
+    ),
+    "fullscreen-exit": _stroke(
+        '<polyline points="4 14 4 21 11 21"/><polyline points="20 10 20 3 13 3"/>'
+        '<line x1="4" y1="21" x2="11" y2="14"/><line x1="20" y1="3" x2="13" y2="10"/>',
+        2.0,
+    ),
 
     # Hamburger menu
     "menu": _stroke(
