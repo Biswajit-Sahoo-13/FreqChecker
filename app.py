@@ -9,28 +9,69 @@ import sys
 import time
 import json
 import math
+import faulthandler
+import traceback
+import datetime
 from typing import List, Dict, Optional, Tuple, Any
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QStackedWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QSlider, QComboBox, QCheckBox,
     QProgressBar, QTextEdit, QFileDialog, QMessageBox, QFrame,
-    QSplitter, QSpinBox, QDoubleSpinBox
+    QSplitter, QSpinBox, QDoubleSpinBox, QSizePolicy, QScrollArea
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QSize
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QSize, QPoint
+from PySide6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QPainterPath
 
 from models import (
     Measurement, Region, ChannelResult, Session,
-    Classification, Stage, RegionCategory
+    Classification, Stage, RegionCategory, practical_round_freq
 )
 from audio_engine import AudioEngine
 from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler
-from ui_components import (
-    LogFrequencyPlotWidget, FxSpectrumVisualizerWidget,
-    DARK_THEME_QSS, LIGHT_THEME_QSS
-)
-from icons import get_svg_icon
+from ui_components import LogFrequencyPlotWidget, FxSpectrumVisualizerWidget
+import fx_theme
+from fx_theme import DARK_THEME_QSS, LIGHT_THEME_QSS, get_fx_color
+from icons import get_svg_icon, get_svg_pixmap
+
+
+def _setup_crash_logger():
+    """Enable faulthandler and top-level excepthook to capture unhandled crashes to disk."""
+    if getattr(sys, "frozen", False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(app_dir, "freqchecker_crash.log")
+
+    try:
+        if sys.stderr is not None:
+            faulthandler.enable()
+        else:
+            crash_file = open(log_path, "a", encoding="utf-8")
+            faulthandler.enable(file=crash_file)
+    except Exception:
+        pass
+
+    def _handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            if sys.__excepthook__:
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.datetime.now().isoformat()}] UNCAUGHT EXCEPTION:\n")
+                traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+        except Exception:
+            pass
+        if sys.__excepthook__:
+            try:
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            except Exception:
+                pass
+
+    sys.excepthook = _handle_exception
+
+_setup_crash_logger()
 
 try:
     import soundfile  # noqa: F401
@@ -64,16 +105,153 @@ class AudioSignalBridge(QObject):
     preflight_detected = Signal(dict)
 
 
+class FxTitleBar(QWidget):
+    """FxSound-exact custom title bar: 57px, #181818/#f5f5f5, drag + min/close, rounded top."""
+
+    def __init__(self, parent_window: QMainWindow):
+        super().__init__(parent_window)
+        self._win = parent_window
+        self._drag_pos: Optional[QPoint] = None
+        self.setFixedHeight(38)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(18, 0, 10, 0)
+        lay.setSpacing(10)
+        # Brand — clickable to homepage (Home) + Back button
+        self.btn_back = QPushButton()
+        self.btn_back.setIcon(get_svg_icon("arrow-left", color="#b1b1b1"))
+        self.btn_back.setIconSize(QSize(16, 16))
+        self.btn_back.setFixedSize(28, 28)
+        self.btn_back.setToolTip("Back")
+        self.btn_back.setStyleSheet("QPushButton { background: rgba(255,255,255,0.06); border: 1px solid #2b2b2b; border-radius: 7px; } QPushButton:hover { background: rgba(255,255,255,0.10); border-color:#3a3a3a; } QPushButton:disabled { opacity: 0.35; }")
+        self.btn_back.clicked.connect(lambda: self._win._go_back())
+        lay.addWidget(self.btn_back)
+        lay.addSpacing(4)
+        # FxSound-style vector logo bars + title (original artwork) — whole brand is Home button
+        self.brand_btn = QPushButton()
+        self.brand_btn.setCursor(Qt.PointingHandCursor)
+        self.brand_btn.setToolTip("Go to Homepage")
+        self.brand_btn.setStyleSheet("QPushButton { background: transparent; border: none; text-align: left; } QPushButton:hover { background: rgba(255,255,255,0.06); border-radius: 8px; }")
+        brand_lay = QHBoxLayout(self.brand_btn)
+        brand_lay.setContentsMargins(6, 2, 8, 2)
+        brand_lay.setSpacing(8)
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setFixedSize(22, 22)
+        self.lbl_icon.setAlignment(Qt.AlignCenter)
+        self.lbl_title_col = QWidget()
+        self.lbl_title_col.setStyleSheet("background: transparent; border: none;")
+        title_col = QVBoxLayout(self.lbl_title_col)
+        title_col.setContentsMargins(0, 2, 0, 2)
+        title_col.setSpacing(1)
+        self.lbl_title = QLabel("FREQCHECKER")
+        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 800; letter-spacing: 1.2px; color: #ffffff; background: transparent; border: none;")
+        self.lbl_sub = QLabel("SPEAKER DIAGNOSTIC STUDIO")
+        self.lbl_sub.setStyleSheet("font-size: 9px; font-weight: 600; color: #7f7f7f; background: transparent; border: none; letter-spacing: 0.8px;")
+        title_col.addWidget(self.lbl_title)
+        title_col.addWidget(self.lbl_sub)
+        brand_lay.addWidget(self.lbl_icon)
+        brand_lay.addWidget(self.lbl_title_col)
+        self.brand_btn.clicked.connect(lambda: self._win._go_home())
+        lay.addWidget(self.brand_btn)
+        lay.addSpacing(6)
+        # Window controls - FxSound thin-line SVG glyphs with crimson close hover
+        self.btn_min = QPushButton()
+        self.btn_min.setIcon(get_svg_icon("minimize", color="#b1b1b1"))
+        self.btn_min.setIconSize(QSize(14, 14))
+        self.btn_min.setFixedSize(32, 26)
+        self.btn_min.setToolTip("Minimize")
+        self.btn_min.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 6px; } QPushButton:hover { background: rgba(255,255,255,0.08); }")
+        self.btn_min.clicked.connect(self._win.showMinimized)
+        self.btn_max = QPushButton()
+        self.btn_max.setIcon(get_svg_icon("maximize", color="#b1b1b1"))
+        self.btn_max.setIconSize(QSize(14, 14))
+        self.btn_max.setFixedSize(32, 26)
+        self.btn_max.setToolTip("Maximize / Restore")
+        self.btn_max.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 6px; } QPushButton:hover { background: rgba(255,255,255,0.08); }")
+        self.btn_max.clicked.connect(self._toggle_maximize)
+        self.btn_close = QPushButton()
+        self.btn_close.setIcon(get_svg_icon("close", color="#b1b1b1"))
+        self.btn_close.setIconSize(QSize(14, 14))
+        self.btn_close.setFixedSize(32, 26)
+        self.btn_close.setToolTip("Close")
+        self.btn_close.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 6px; } QPushButton:hover { background: #d51535; }")
+        self.btn_close.clicked.connect(self._win.close)
+        lay.addWidget(self.btn_min)
+        lay.addWidget(self.btn_max)
+        lay.addWidget(self.btn_close)
+
+    def _toggle_maximize(self):
+        if self._win.isMaximized():
+            self._win.showNormal()
+        else:
+            self._win.showMaximized()
+
+    def update_theme(self, is_dark: bool):
+        bg = "#181818" if is_dark else "#f5f5f5"
+        tc = "#ffffff" if is_dark else "#1f1f1f"
+        sc = "#7f7f7f"
+        ac = "#d51535" if is_dark else "#1ac1ff"
+        icon_c = "#b1b1b1" if is_dark else "#5a5a5a"
+        # When maximized in frameless mode, remove top radius to fill screen
+        is_max = self._win.isMaximized()
+        r = 0 if is_max else 12
+        self.setStyleSheet(f"background-color: {bg}; border: none; border-top-left-radius: {r}px; border-top-right-radius: {r}px;")
+        self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 800; letter-spacing: 1.2px; color: {tc}; background: transparent; border: none;")
+        self.lbl_sub.setStyleSheet(f"font-size: 9px; font-weight: 600; color: {sc}; background: transparent; border: none; letter-spacing: 0.8px;")
+        self.lbl_icon.setPixmap(get_svg_pixmap("logo-bars", color=ac, size=QSize(18, 18)))
+        self.btn_back.setIcon(get_svg_icon("arrow-left", color=icon_c))
+        self.btn_min.setIcon(get_svg_icon("minimize", color=icon_c))
+        self.btn_max.setIcon(get_svg_icon("maximize", color=icon_c))
+        self.btn_close.setIcon(get_svg_icon("close", color=icon_c))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self._win.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton and self._drag_pos is not None:
+            self._win.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    def mouseDoubleClickEvent(self, event):
+        if self._win.isMaximized():
+            self._win.showNormal()
+        else:
+            self._win.showMaximized()
+
+
 class FreqCheckerApp(QMainWindow):
     """
     Main application window implementing all diagnostic modes, wizards, and report dashboards.
     """
-    def __init__(self):
+    def __init__(self, frameless: bool = False):
         super().__init__()
         self.setWindowTitle("FreqChecker — Speaker Diagnostic Studio")
-        self.resize(1060, 720)
-        self.setMinimumSize(860, 580)
+        self.resize(1120, 740)
+        self.setMinimumSize(960, 640)
         self.is_dark_theme: bool = True
+        self._frameless = frameless
+        if frameless:
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint | Qt.WindowSystemMenuHint)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            # Container for frameless rounded + shadow (FxSound 21px radius homage, 12px practical)
+            self._frame_container = QFrame()
+            self._frame_container.setObjectName("FramelessContainer")
+            self._frame_container.setStyleSheet(f"QFrame#FramelessContainer {{ background-color: {'#181818' if self.is_dark_theme else '#f5f5f5'}; border: 1px solid {'#2b2b2b' if self.is_dark_theme else '#d9d9d9'}; border-radius: 12px; }}")
+            outer = QVBoxLayout(self._frame_container)
+            outer.setContentsMargins(1, 1, 1, 1)
+            outer.setSpacing(0)
+            self._title_bar = FxTitleBar(self)
+            self._title_bar.update_theme(self.is_dark_theme)
+            outer.addWidget(self._title_bar)
+            # placeholder for central handled below - keep ref to inject
+        else:
+            # Ensure native window has Min/Max/Close (fixes missing maximize in screenshot)
+            self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowSystemMenuHint)
         
         # Audio Engine & Thread Bridge
         self.audio_engine = AudioEngine(sample_rate=48000, default_peak=0.4)
@@ -95,6 +273,11 @@ class FreqCheckerApp(QMainWindow):
         self.last_playback_ok: Optional[bool] = None
         self._heard_selection: Optional[bool] = None
         self.sweep_start_time: Optional[float] = None
+        self.blind_mode: bool = False
+        self._progress_floor: int = 0
+        self._max_queue_len: int = 0
+        self._sweep_retest_active: bool = False
+        self._manual_retest_freqs: List[float] = []
         
         # Music state
         self.music_original: Optional[Any] = None
@@ -113,20 +296,44 @@ class FreqCheckerApp(QMainWindow):
         self.controller = DiagnosticController(mode="detailed")
         self.scheduler = TestScheduler(mode="detailed")
         
-        # Central Widget
+        # Central Widget (frameless wrapper if enabled)
         self.central_widget = QWidget()
         self.central_widget.setObjectName("CentralWidget")
-        self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(16, 12, 16, 14)
-        self.main_layout.setSpacing(10)
+        self.main_layout.setContentsMargins(18, 14, 18, 16)
+        self.main_layout.setSpacing(12)
+        if self._frameless:
+            # Embed central into frameless container
+            outer = self._frame_container.layout()
+            outer.addWidget(self.central_widget, 1)
+            wrapper = QWidget()
+            wrapper.setAttribute(Qt.WA_TranslucentBackground, True)
+            wlay = QVBoxLayout(wrapper)
+            wlay.setContentsMargins(8, 8, 8, 8)
+            wlay.addWidget(self._frame_container)
+            self.setCentralWidget(wrapper)
+        else:
+            self.setCentralWidget(self.central_widget)
         
         # Build Global Top Navigation Bar
         self._build_top_navbar()
         
-        # Stacked Views
+        # Stacked Views — wrapped in QScrollArea so small / short windows scroll instead of clipping (fixes minimized text cut)
         self.stack = QStackedWidget()
-        self.main_layout.addWidget(self.stack, 1)
+        self.stack_scroll = QScrollArea()
+        self.stack_scroll.setWidgetResizable(True)
+        self.stack_scroll.setFrameShape(QFrame.NoFrame)
+        self.stack_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.stack_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.stack_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        _scroll_container = QWidget()
+        _scroll_container.setStyleSheet("background: transparent;")
+        _scroll_lay = QVBoxLayout(_scroll_container)
+        _scroll_lay.setContentsMargins(0, 0, 0, 0)
+        _scroll_lay.setSpacing(0)
+        _scroll_lay.addWidget(self.stack)
+        self.stack_scroll.setWidget(_scroll_container)
+        self.main_layout.addWidget(self.stack_scroll, 1)
         
         # Build Subviews
         self._build_wizard_view()
@@ -145,13 +352,120 @@ class FreqCheckerApp(QMainWindow):
         # Start on wizard
         self._switch_page(PAGE_WIZARD)
 
+    def _has_unsaved_progress(self) -> bool:
+        return bool(
+            self.session
+            and any(len(r.measurements) for r in self.session.channel_results.values())
+        )
+
+    def _autosave_session_json(self) -> Optional[str]:
+        if not self.session:
+            return None
+        try:
+            if getattr(sys, "frozen", False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            save_dir = os.path.join(base_dir, "saved_sessions")
+            os.makedirs(save_dir, exist_ok=True)
+            path = os.path.join(save_dir, f"session_{self.session.session_id}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.session.to_dict(), f, indent=2)
+            return path
+        except Exception:
+            return None
+
+    def _offer_partial_save(self) -> bool:
+        """
+        Ask the user what to do with in-progress session data.
+        Returns True when it is OK to proceed (saved or discarded), False to stay.
+        """
+        if not self._has_unsaved_progress():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Unsaved Diagnostic Progress")
+        box.setText("This session has recorded ratings that are not saved yet.")
+        box.setInformativeText("Save a partial session file before continuing?")
+        save_btn = box.addButton("Save Partial", QMessageBox.AcceptRole)
+        discard_btn = box.addButton("Discard", QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == save_btn:
+            path = self._autosave_session_json()
+            if path:
+                QMessageBox.information(self, "Session Saved", f"Partial session saved to:\n{path}")
+            else:
+                QMessageBox.warning(self, "Save Failed", "Could not write the session file. Nothing was saved.")
+            return True
+        if clicked == discard_btn:
+            return True
+        return False
+
     def closeEvent(self, event):
+        if hasattr(self, "stack") and self.stack.currentIndex() == PAGE_TESTING:
+            self.audio_engine.stop_playback()
+            if not self._offer_partial_save():
+                event.ignore()
+                return
+            reply = QMessageBox.question(
+                self,
+                "Exit Diagnostic Test?",
+                "Do you want to exit the application now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+
         if hasattr(self, "sweep_timer"):
             self.sweep_timer.stop()
         if hasattr(self, "music_timer"):
             self.music_timer.stop()
         self.audio_engine.stop_playback()
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Responsive: on narrow windows (<1020px) stack columns vertically so no text clipped / alignment survives minimized
+        narrow = self.width() < 1020
+        short = self.height() < 700
+        for name in ("wizard_splitter", "manual_splitter", "sweep_splitter", "results_splitter"):
+            sp = getattr(self, name, None)
+            if sp is not None:
+                target = Qt.Vertical if narrow else Qt.Horizontal
+                # results: also go vertical when window is short
+                if name == "results_splitter" and (narrow or short):
+                    target = Qt.Vertical
+                if sp.orientation() != target:
+                    sp.setOrientation(target)
+                    if target == Qt.Vertical:
+                        total = sp.height() if sp.height() > 100 else (400 if name=="results_splitter" else 600)
+                        if name == "results_splitter":
+                            sp.setSizes([260, 220])
+                        else:
+                            sp.setSizes([int(total*0.45), int(total*0.55)])
+                    else:
+                        if name == "results_splitter":
+                            sp.setSizes([620, 360])
+                        else:
+                            sp.setSizes([480, 520])
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange and hasattr(self, "_title_bar"):
+            # update title bar radius / icon color on maximize / restore
+            self._title_bar.update_theme(self.is_dark_theme)
+            if hasattr(self, "_frame_container"):
+                is_max = self.isMaximized()
+                r = 0 if is_max else 12
+                # frameless container: square when maximized, rounded when restored
+                self._frame_container.setStyleSheet(
+                    f"QFrame#FramelessContainer {{ background-color: {'#181818' if self.is_dark_theme else '#f5f5f5'}; border: {'none' if is_max else '1px solid ' + ('#2b2b2b' if self.is_dark_theme else '#d9d9d9')}; border-radius: {r}px; }}"
+                )
 
     # =========================================================================
     # GLOBAL TOP NAVBAR & THEME SWITCHER
@@ -160,22 +474,34 @@ class FreqCheckerApp(QMainWindow):
         nav_card = QFrame()
         nav_card.setProperty("class", "card")
         n_layout = QHBoxLayout(nav_card)
-        n_layout.setContentsMargins(16, 8, 16, 8)
-        n_layout.setSpacing(14)
+        n_layout.setContentsMargins(20, 12, 20, 12)
+        n_layout.setSpacing(16)
         
-        # Brand / Logo
-        brand_layout = QVBoxLayout()
+        # Brand / Logo — clickable to Homepage
+        brand_frame = QFrame()
+        brand_frame.setCursor(Qt.PointingHandCursor)
+        brand_frame.setToolTip("Go to Homepage")
+        brand_frame.setStyleSheet("QFrame { background: transparent; border: none; border-radius: 8px; } QFrame:hover { background: rgba(255,255,255,0.06); }")
+        brand_layout = QVBoxLayout(brand_frame)
+        brand_layout.setContentsMargins(6, 4, 6, 4)
         brand_layout.setSpacing(0)
         lbl_brand = QLabel("FREQCHECKER")
         lbl_brand.setProperty("class", "brand-title")
+        lbl_brand.setStyleSheet("background: transparent; border: none;")
         lbl_tag = QLabel("SPEAKER DIAGNOSTIC STUDIO")
-        lbl_tag.setStyleSheet("font-size: 9px; font-weight: 700; color: #00A2FF; letter-spacing: 1px;")
+        lbl_tag.setProperty("class", "hint")
+        lbl_tag.setStyleSheet("background: transparent; border: none;")
         brand_layout.addWidget(lbl_brand)
         brand_layout.addWidget(lbl_tag)
-        n_layout.addLayout(brand_layout)
+        # click anywhere on brand goes home
+        def _brand_click(event):
+            if event.button() == Qt.LeftButton:
+                self._go_home()
+        brand_frame.mousePressEvent = _brand_click
+        n_layout.addWidget(brand_frame)
         n_layout.addStretch()
         
-        # Top Center 9-Band Spectrum Visualizer Monitor Box (Explaining what it does)
+        # Top Center 9-Band Spectrum Visualizer Monitor Box
         vis_container = QFrame()
         vis_container.setStyleSheet("background: transparent;")
         vis_layout = QVBoxLayout(vis_container)
@@ -187,14 +513,15 @@ class FreqCheckerApp(QMainWindow):
         vis_header.setSpacing(6)
         vis_header.setAlignment(Qt.AlignCenter)
         lbl_vis_title = QLabel("LIVE 9-BAND SPECTRUM MONITOR")
-        lbl_vis_title.setStyleSheet("font-size: 9px; font-weight: 700; color: #00A2FF; letter-spacing: 0.8px;")
+        lbl_vis_title.setProperty("class", "section-title")
         lbl_vis_desc = QLabel("(63 Hz – 16 kHz)")
-        lbl_vis_desc.setStyleSheet("font-size: 9px; color: #8A99AD;")
+        lbl_vis_desc.setProperty("class", "hint")
         vis_header.addWidget(lbl_vis_title)
         vis_header.addWidget(lbl_vis_desc)
         vis_layout.addLayout(vis_header)
         
-        self.top_visualizer = FxSpectrumVisualizerWidget()
+        self.top_visualizer = FxSpectrumVisualizerWidget(height=46)
+        self.top_visualizer.set_provider(self._get_spectrum_values)
         vis_layout.addWidget(self.top_visualizer)
         n_layout.addWidget(vis_container)
         n_layout.addStretch()
@@ -203,45 +530,98 @@ class FreqCheckerApp(QMainWindow):
         self.btn_theme_toggle = QPushButton("Dark Mode")
         self.btn_theme_toggle.setProperty("class", "secondary")
         self.btn_theme_toggle.setFixedHeight(34)
-        self.btn_theme_toggle.setIcon(get_svg_icon("moon", color="#00A2FF"))
+        self.btn_theme_toggle.setIcon(get_svg_icon("moon", color=get_fx_color("primary_accent", True)))
         self.btn_theme_toggle.setIconSize(QSize(16, 16))
         self.btn_theme_toggle.clicked.connect(self._toggle_theme)
         n_layout.addWidget(self.btn_theme_toggle)
         
         self.main_layout.addWidget(nav_card)
 
+    def _get_spectrum_values(self) -> Optional[List[float]]:
+        """Data provider for real-time spectrum visualizer during active playback.
+
+        Returns genuine 9-band FFT energies computed by the audio engine from
+        the buffer actually being played; None when nothing is playing.
+        """
+        try:
+            return self.audio_engine.get_spectrum_bands()
+        except Exception:
+            return None
+
     def _toggle_theme(self):
         self.is_dark_theme = not self.is_dark_theme
-        qss = DARK_THEME_QSS if self.is_dark_theme else LIGHT_THEME_QSS
+        fx_theme.set_theme("dark" if self.is_dark_theme else "light")
+        qss = fx_theme.get_qss(self.is_dark_theme)
         QApplication.instance().setStyleSheet(qss)
+        accent = get_fx_color("primary_accent", self.is_dark_theme)
+        cyan = get_fx_color("cyan_secondary", self.is_dark_theme)
         if self.is_dark_theme:
             self.btn_theme_toggle.setText("Dark Mode")
-            self.btn_theme_toggle.setIcon(get_svg_icon("moon", color="#00A2FF"))
+            self.btn_theme_toggle.setIcon(get_svg_icon("moon", color=accent))
         else:
             self.btn_theme_toggle.setText("Light Mode")
-            self.btn_theme_toggle.setIcon(get_svg_icon("sun", color="#0084E6"))
-        self.top_visualizer.set_theme(self.is_dark_theme)
+            self.btn_theme_toggle.setIcon(get_svg_icon("sun", color=accent))
+        # Update dynamic accent icons across the app
+        self._refresh_accent_icons()
+        if hasattr(self, "_title_bar"):
+            self._title_bar.update_theme(self.is_dark_theme)
+            # frameless container border
+            self._frame_container.setStyleSheet(f"QFrame#FramelessContainer {{ background-color: {'#181818' if self.is_dark_theme else '#f5f5f5'}; border: 1px solid {'#2b2b2b' if self.is_dark_theme else '#d9d9d9'}; border-radius: 12px; }}")
         self.live_plot.set_theme(self.is_dark_theme)
         self.results_plot.set_theme(self.is_dark_theme)
         self._update_channel_badge()
+        self.update()  # repaint frameless shadow/border
+
+    def _refresh_accent_icons(self):
+        """Refresh all accent-colored SVG icons after theme swap (FxSound palette)."""
+        accent = get_fx_color("primary_accent", self.is_dark_theme)
+        # Wizard calibration toggle — keep danger white when stop-active
+        if hasattr(self, "btn_cal_toggle"):
+            if getattr(self, "_is_calibrating", False):
+                self.btn_cal_toggle.setIcon(get_svg_icon("stop", color="#FFFFFF"))
+            else:
+                self.btn_cal_toggle.setIcon(get_svg_icon("play", color=accent))
+        if hasattr(self, "btn_autodetect"):
+            self.btn_autodetect.setIcon(get_svg_icon("zap", color=accent))
+        for name in ("btn_manual", "btn_sweep", "btn_music"):
+            if hasattr(self, name):
+                getattr(self, name).setIcon(get_svg_icon("activity" if "manual" in name or "sweep" in name else "volume-2", color=accent))
+        if hasattr(self, "btn_replay"):
+            self.btn_replay.setIcon(get_svg_icon("rotate-ccw", color=accent))
+        if hasattr(self, "btn_music_load"):
+            self.btn_music_load.setIcon(get_svg_icon("folder", color=accent))
+        for name in ("btn_csv", "btn_json", "btn_txt", "btn_load", "btn_stress"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                icon_name = "file-text" if name == "btn_txt" else ("folder" if name == "btn_load" else "volume-2" if name == "btn_stress" else "download")
+                btn.setIcon(get_svg_icon(icon_name, color=accent))
+        # arrow backs
+        for child in self.findChildren(QPushButton):
+            if child.text().strip().startswith("Return"):
+                child.setIcon(get_svg_icon("arrow-left", color=accent))
 
     def _switch_page(self, index: int):
         self.stack.setCurrentIndex(index)
 
     def _on_playback_started_ui(self, freq_hz: float = 1000.0):
+        self._active_tone_freq = freq_hz
         self.btn_replay.setEnabled(False)
-        self.top_visualizer.set_playing_state(True, freq_hz)
+        self.top_visualizer.start_if_playing()
 
     def _on_playback_finished_ui(self, ok: bool, err_msg: str):
         self.btn_replay.setEnabled(True)
-        if hasattr(self, "btn_cal_play"):
-            self.btn_cal_play.setEnabled(True)
-        if hasattr(self, "btn_cal_stop"):
-            self.btn_cal_stop.setEnabled(False)
+        # Reset single calibration toggle to Play state when tone completes naturally
+        if hasattr(self, "btn_cal_toggle") and getattr(self, "_is_calibrating", False):
+            self._is_calibrating = False
+            self.btn_cal_toggle.setText("Play 1 kHz Calibration Tone")
+            self.btn_cal_toggle.setProperty("class", "secondary")
+            self.btn_cal_toggle.setIcon(get_svg_icon("play", color="#d51535"))
+            self.btn_cal_toggle.style().unpolish(self.btn_cal_toggle)
+            self.btn_cal_toggle.style().polish(self.btn_cal_toggle)
+            self.top_visualizer.stop_and_clear()
         self.last_playback_ok = ok
-        self.top_visualizer.set_playing_state(False)
         if not ok and err_msg:
-            QTimer.singleShot(100, lambda: self._show_playback_error(err_msg))
+            self._show_playback_error(err_msg)
 
     def _show_playback_error(self, err_msg: str):
         if self.stack.currentIndex() == PAGE_TESTING:
@@ -258,10 +638,15 @@ class FreqCheckerApp(QMainWindow):
         QShortcut(QKeySequence("Y"), self, self._on_shortcut_yes)
         QShortcut(QKeySequence("N"), self, self._on_shortcut_no)
         QShortcut(QKeySequence("R"), self, self._on_shortcut_r)
+        QShortcut(QKeySequence("Z"), self, self._on_shortcut_z)
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._stop_current_test)
         QShortcut(QKeySequence("T"), self, lambda: self._submit_with(True, 10))
         for i in range(10):
             QShortcut(QKeySequence(str(i)), self, lambda val=i: self._submit_with(True, val))
+
+    def _on_shortcut_z(self):
+        if self.stack.currentIndex() == PAGE_TESTING:
+            self._undo_last_rating()
 
     def _on_shortcut_r(self):
         if self.stack.currentIndex() == PAGE_TESTING:
@@ -293,10 +678,12 @@ class FreqCheckerApp(QMainWindow):
         
         title = QLabel("Speaker Health & Frequency Diagnostic")
         title.setProperty("class", "title")
+        title.setWordWrap(True)
         subtitle = QLabel(
             "Perceptual 1/3-octave frequency sweep with adaptive bisection to locate speaker dips, distortion, and rolloff."
         )
         subtitle.setProperty("class", "subtitle")
+        subtitle.setWordWrap(True)
         h_layout.addWidget(title)
         h_layout.addWidget(subtitle)
         layout.addWidget(header_card)
@@ -322,33 +709,24 @@ class FreqCheckerApp(QMainWindow):
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         cl_layout.addWidget(self.device_combo)
         
-        # Calibration Tone Controls (Play + Stop Button with SVG Icons)
-        cal_row = QHBoxLayout()
-        cal_row.setSpacing(8)
-        self.btn_cal_play = QPushButton("Play 1 kHz Calibration Tone")
-        self.btn_cal_play.setProperty("class", "secondary")
-        self.btn_cal_play.setIcon(get_svg_icon("play", color="#00A2FF"))
-        self.btn_cal_play.setIconSize(QSize(16, 16))
-        self.btn_cal_play.clicked.connect(self._play_calibration_tone)
-        
-        self.btn_cal_stop = QPushButton("Stop")
-        self.btn_cal_stop.setProperty("class", "danger")
-        self.btn_cal_stop.setIcon(get_svg_icon("stop", color="#FFFFFF"))
-        self.btn_cal_stop.setIconSize(QSize(14, 14))
-        self.btn_cal_stop.setEnabled(False)
-        self.btn_cal_stop.setFixedWidth(80)
-        self.btn_cal_stop.clicked.connect(self._stop_calibration_tone)
-        
-        cal_row.addWidget(self.btn_cal_play, 1)
-        cal_row.addWidget(self.btn_cal_stop)
-        cl_layout.addLayout(cal_row)
+        # Single toggle Play/Stop Calibration (FxSound one-button design)
+        self._is_calibrating = False
+        self.btn_cal_toggle = QPushButton("Play 1 kHz Calibration Tone")
+        self.btn_cal_toggle.setProperty("class", "secondary")
+        self.btn_cal_toggle.setIcon(get_svg_icon("play", color="#d51535"))
+        self.btn_cal_toggle.setIconSize(QSize(16, 16))
+        self.btn_cal_toggle.setMinimumHeight(38)
+        self.btn_cal_toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_cal_toggle.clicked.connect(self._toggle_calibration_tone)
+        # Single button occupies full row — Stop state is the same button styled as danger
+        cl_layout.addWidget(self.btn_cal_toggle)
         
         vol_info = QLabel(
             "- Keep system volume steady at 40-60% throughout the test.\n"
             "- Calibration tone plays on both channels to set your hearing baseline.\n"
             "- Use the Stop button anytime to silence calibration immediately."
         )
-        vol_info.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        vol_info.setStyleSheet("color: #b1b1b1; font-size: 11px;")
         vol_info.setWordWrap(True)
         cl_layout.addWidget(vol_info)
         
@@ -376,7 +754,7 @@ class FreqCheckerApp(QMainWindow):
         
         self.btn_autodetect = QPushButton("Auto-Detect Conditions")
         self.btn_autodetect.setProperty("class", "secondary")
-        self.btn_autodetect.setIcon(get_svg_icon("zap", color="#00A2FF"))
+        self.btn_autodetect.setIcon(get_svg_icon("zap", color="#d51535"))
         self.btn_autodetect.setIconSize(QSize(14, 14))
         self.btn_autodetect.setFixedHeight(28)
         self.btn_autodetect.setToolTip("Auto-scans running DSP processes, audio hardware configuration, and ambient noise.")
@@ -387,7 +765,7 @@ class FreqCheckerApp(QMainWindow):
         # Pre-Flight Auto-Detection Status Card
         status_box = QFrame()
         status_box.setStyleSheet(
-            "background-color: rgba(30, 36, 48, 0.6); border: 1px solid #2E3542; border-radius: 8px; padding: 6px;"
+            "background-color: rgba(15, 15, 15, 0.6); border: 1px solid #2b2b2b; border-radius: 8px; padding: 6px;"
         )
         sb_layout = QVBoxLayout(status_box)
         sb_layout.setContentsMargins(8, 6, 8, 6)
@@ -406,7 +784,7 @@ class FreqCheckerApp(QMainWindow):
         self.lbl_mic_badge.setWordWrap(True)
         
         self.lbl_preflight_summary = QLabel("[Status] Pre-Flight Auto-Detection Active")
-        self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #00A2FF;")
+        self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #d51535;")
         
         sb_layout.addWidget(self.lbl_dsp_badge)
         sb_layout.addWidget(self.lbl_hw_badge)
@@ -425,15 +803,27 @@ class FreqCheckerApp(QMainWindow):
         cr_layout.addWidget(self.chk_quiet)
         
         calib_note = QLabel("[Note] 1 kHz reference tones anchor your personal perception scale.")
-        calib_note.setStyleSheet("color: #00A2FF; font-size: 11px; font-weight: 600;")
+        calib_note.setStyleSheet("color: #d51535; font-size: 11px; font-weight: 600;")
         calib_note.setWordWrap(True)
         cr_layout.addWidget(calib_note)
         
         cr_layout.addWidget(QLabel("Diagnostic Mode:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Detailed (1/3-Octave + Adaptive Bisection)", "detailed")
-        self.mode_combo.addItem("Quick (~8 test frequencies)", "quick")
+        self.mode_combo.addItem("Detailed (25 × 1/3-Octave + Adaptive)", "detailed")
+        self.mode_combo.addItem("Quick (6 tones from 250 Hz — laptop friendly)", "quick")
+        self.mode_combo.setToolTip("Quick now starts at 250 Hz because most laptop drivers roll off below that. Use Detailed if you have headphones or large monitors.")
         cr_layout.addWidget(self.mode_combo)
+        quick_hint = QLabel("Quick starts at 250 Hz to skip inaudible sub-bass on laptop speakers. Use Detailed for 63 Hz–16 kHz with roll-off-aware scoring.")
+        quick_hint.setWordWrap(True)
+        quick_hint.setStyleSheet("color: #7f7f7f; font-size: 11px; font-style: italic;")
+        cr_layout.addWidget(quick_hint)
+        self.chk_include_subbass = QCheckBox("Include sub-bass tones (63–200 Hz) even in Quick mode")
+        self.chk_include_subbass.setToolTip("Enable to test 63, 80, 100, 125, 160, 200 Hz. Leave off if your speaker cannot reproduce bass — otherwise lows will appear as Expected low-frequency roll-off, not a failure.")
+        cr_layout.addWidget(self.chk_include_subbass)
+
+        self.chk_blind = QCheckBox("Blind Mode (hide frequency until rated)")
+        self.chk_blind.setToolTip("Reduces expectation bias: the tone frequency stays hidden until the session ends.")
+        cr_layout.addWidget(self.chk_blind)
         
         btn_start_diag = QPushButton("Start Diagnostic Test")
         btn_start_diag.setIcon(get_svg_icon("arrow-right", color="#FFFFFF"))
@@ -444,21 +834,21 @@ class FreqCheckerApp(QMainWindow):
         
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        btn_manual = QPushButton("Manual Tone")
-        btn_manual.setProperty("class", "secondary")
-        btn_manual.setIcon(get_svg_icon("activity", color="#00A2FF"))
-        btn_manual.clicked.connect(lambda: self._switch_page(PAGE_MANUAL))
-        btn_sweep = QPushButton("Sweep Mode")
-        btn_sweep.setProperty("class", "secondary")
-        btn_sweep.setIcon(get_svg_icon("activity", color="#00A2FF"))
-        btn_sweep.clicked.connect(lambda: self._switch_page(PAGE_SWEEP))
-        btn_music = QPushButton("Music Test")
-        btn_music.setProperty("class", "secondary")
-        btn_music.setIcon(get_svg_icon("volume-2", color="#00A2FF"))
-        btn_music.clicked.connect(lambda: self._switch_page(PAGE_MUSIC))
-        btn_row.addWidget(btn_manual)
-        btn_row.addWidget(btn_sweep)
-        btn_row.addWidget(btn_music)
+        self.btn_manual = QPushButton("Manual Tone")
+        self.btn_manual.setProperty("class", "secondary")
+        self.btn_manual.setIcon(get_svg_icon("activity", color="#d51535"))
+        self.btn_manual.clicked.connect(lambda: self._switch_page(PAGE_MANUAL))
+        self.btn_sweep = QPushButton("Sweep Mode")
+        self.btn_sweep.setProperty("class", "secondary")
+        self.btn_sweep.setIcon(get_svg_icon("activity", color="#d51535"))
+        self.btn_sweep.clicked.connect(lambda: self._switch_page(PAGE_SWEEP))
+        self.btn_music = QPushButton("Music Test")
+        self.btn_music.setProperty("class", "secondary")
+        self.btn_music.setIcon(get_svg_icon("volume-2", color="#d51535"))
+        self.btn_music.clicked.connect(lambda: self._switch_page(PAGE_MUSIC))
+        btn_row.addWidget(self.btn_manual)
+        btn_row.addWidget(self.btn_sweep)
+        btn_row.addWidget(self.btn_music)
         cr_layout.addLayout(btn_row)
         cr_layout.addStretch()
         self.wizard_splitter.addWidget(col_right)
@@ -488,7 +878,7 @@ class FreqCheckerApp(QMainWindow):
         dev_idx = self.device_combo.currentData() if hasattr(self, "device_combo") else None
         if hasattr(self, "lbl_preflight_summary"):
             self.lbl_preflight_summary.setText("[Status] Scanning audio environment in background...")
-            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #888888;")
+            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #7f7f7f;")
         import threading
         def worker():
             res = self.audio_engine.detect_preflight_conditions(dev_idx)
@@ -545,30 +935,43 @@ class FreqCheckerApp(QMainWindow):
             
         if res["all_clear"]:
             self.lbl_preflight_summary.setText("[Status] System Ready: All Pre-Flight Conditions Verified [OK]")
-            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #00E5FF;")
+            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #d51535;")
         else:
             self.lbl_preflight_summary.setText("[Status] Pre-Flight Notice: Check recommendations above before starting")
-            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #FFB300;")
+            self.lbl_preflight_summary.setStyleSheet("font-size: 10px; font-weight: 700; color: #faad14;")
+
+    def _toggle_calibration_tone(self):
+        if getattr(self, "_is_calibrating", False):
+            self._stop_calibration_tone()
+        else:
+            self._play_calibration_tone()
 
     def _play_calibration_tone(self):
-        if hasattr(self, "btn_cal_play"):
-            self.btn_cal_play.setEnabled(False)
-        if hasattr(self, "btn_cal_stop"):
-            self.btn_cal_stop.setEnabled(True)
+        self._is_calibrating = True
+        if hasattr(self, "btn_cal_toggle"):
+            self.btn_cal_toggle.setText("Stop Calibration Tone")
+            self.btn_cal_toggle.setProperty("class", "danger")
+            self.btn_cal_toggle.setIcon(get_svg_icon("stop", color="#FFFFFF"))
+            self.btn_cal_toggle.style().unpolish(self.btn_cal_toggle)
+            self.btn_cal_toggle.style().polish(self.btn_cal_toggle)
         tone = self.audio_engine.generate_sine_tone(1000.0, duration_s=2.5, peak=0.4, channel="both")
         self.audio_engine.play_audio(
             tone,
             on_started=lambda: self.audio_bridge.playback_started.emit(1000.0),
-            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or "")
+            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": tone, "sample_rate": self.audio_engine.sample_rate}
         )
 
     def _stop_calibration_tone(self):
         self.audio_engine.stop_playback()
-        if hasattr(self, "btn_cal_play"):
-            self.btn_cal_play.setEnabled(True)
-        if hasattr(self, "btn_cal_stop"):
-            self.btn_cal_stop.setEnabled(False)
-        self.top_visualizer.set_playing_state(False)
+        self._is_calibrating = False
+        if hasattr(self, "btn_cal_toggle"):
+            self.btn_cal_toggle.setText("Play 1 kHz Calibration Tone")
+            self.btn_cal_toggle.setProperty("class", "secondary")
+            self.btn_cal_toggle.setIcon(get_svg_icon("play", color="#d51535"))
+            self.btn_cal_toggle.style().unpolish(self.btn_cal_toggle)
+            self.btn_cal_toggle.style().polish(self.btn_cal_toggle)
+        self.top_visualizer.stop_and_clear()
 
     # =========================================================================
     # 2. ACTIVE DIAGNOSTIC TEST VIEW (STREAMLINED 1-TOUCH ADVANCE)
@@ -588,12 +991,12 @@ class FreqCheckerApp(QMainWindow):
         
         self.lbl_channel_badge = QLabel("LEFT CHANNEL")
         self.lbl_channel_badge.setStyleSheet(
-            "background: #00E5FF; color: #14161A; padding: 5px 14px; border-radius: 7px; "
+            "background: #d51535; color: #ffffff; padding: 5px 14px; border-radius: 7px; "
             "font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
         )
         
         self.lbl_stage_info = QLabel("Stage: Coarse Scan · 1/25")
-        self.lbl_stage_info.setStyleSheet("color: #B0B0B0; font-size: 12px; font-weight: 600;")
+        self.lbl_stage_info.setProperty("class", "subtitle")
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -601,7 +1004,7 @@ class FreqCheckerApp(QMainWindow):
         self.progress_bar.setFixedWidth(160)
         
         self.lbl_remaining = QLabel("~24 tests left")
-        self.lbl_remaining.setStyleSheet("color: #888888; font-size: 11px;")
+        self.lbl_remaining.setProperty("class", "hint")
         
         btn_stop = QPushButton("Stop (Esc)")
         btn_stop.setProperty("class", "danger")
@@ -626,18 +1029,26 @@ class FreqCheckerApp(QMainWindow):
         tc_layout.setContentsMargins(22, 16, 22, 16)
         tc_layout.setSpacing(14)
         
-        # Tone Header Row (Frequency + Replay Button with SVG Icon)
+        # Tone Header Row (Frequency + Replay/Undo Buttons with SVG Icons)
         freq_row = QHBoxLayout()
         self.lbl_frequency = QLabel("1,000 Hz")
         self.lbl_frequency.setProperty("class", "freq-display")
+        self.btn_undo = QPushButton("Undo (Z)")
+        self.btn_undo.setProperty("class", "secondary")
+        self.btn_undo.setIcon(get_svg_icon("rotate-ccw", color="#d51535"))
+        self.btn_undo.setIconSize(QSize(14, 14))
+        self.btn_undo.setFixedHeight(38)
+        self.btn_undo.setToolTip("Remove the last rating and replay the same tone.")
+        self.btn_undo.clicked.connect(self._undo_last_rating)
         self.btn_replay = QPushButton("Replay Tone (R)")
         self.btn_replay.setProperty("class", "secondary")
-        self.btn_replay.setIcon(get_svg_icon("rotate-ccw", color="#00A2FF"))
+        self.btn_replay.setIcon(get_svg_icon("rotate-ccw", color="#d51535"))
         self.btn_replay.setIconSize(QSize(16, 16))
         self.btn_replay.setFixedHeight(38)
         self.btn_replay.clicked.connect(self._replay_current_tone)
         freq_row.addWidget(self.lbl_frequency)
         freq_row.addStretch()
+        freq_row.addWidget(self.btn_undo)
         freq_row.addWidget(self.btn_replay)
         tc_layout.addLayout(freq_row)
         
@@ -646,14 +1057,14 @@ class FreqCheckerApp(QMainWindow):
         choice_row.setSpacing(14)
         self.btn_choice_yes = QPushButton("Yes, I Heard It (Y)")
         self.btn_choice_yes.setProperty("class", "toggle-choice")
-        self.btn_choice_yes.setIcon(get_svg_icon("check", color="#00E5FF"))
+        self.btn_choice_yes.setIcon(get_svg_icon("check", color="#d51535"))
         self.btn_choice_yes.setIconSize(QSize(18, 18))
         self.btn_choice_yes.setFixedHeight(46)
         self.btn_choice_yes.clicked.connect(lambda: self._select_heard(True))
         
         self.btn_choice_no = QPushButton("No, Didn't Hear (N)")
         self.btn_choice_no.setProperty("class", "toggle-choice")
-        self.btn_choice_no.setIcon(get_svg_icon("x", color="#FF5252"))
+        self.btn_choice_no.setIcon(get_svg_icon("x", color="#ff4d4f"))
         self.btn_choice_no.setIconSize(QSize(18, 18))
         self.btn_choice_no.setFixedHeight(46)
         self.btn_choice_no.clicked.connect(lambda: self._submit_with(False))
@@ -670,19 +1081,19 @@ class FreqCheckerApp(QMainWindow):
         
         c_header = QHBoxLayout()
         c_label = QLabel("Clarity Score — click a score to continue:")
-        c_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #B0B0B0;")
+        c_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #b1b1b1;")
         c_header.addWidget(c_label)
         c_header.addStretch()
         
         # Optional Distortion slider
         dist_lbl = QLabel("Buzz / Distortion (opt):")
-        dist_lbl.setStyleSheet("color: #888888; font-size: 11px;")
+        dist_lbl.setStyleSheet("color: #7f7f7f; font-size: 11px;")
         self.dist_slider = QSlider(Qt.Horizontal)
         self.dist_slider.setRange(0, 10)
         self.dist_slider.setValue(0)
         self.dist_slider.setFixedWidth(100)
         self.lbl_dist_val = QLabel("0")
-        self.lbl_dist_val.setStyleSheet("color: #888888; font-size: 11px; font-weight: 600;")
+        self.lbl_dist_val.setStyleSheet("color: #7f7f7f; font-size: 11px; font-weight: 600;")
         self.dist_slider.valueChanged.connect(lambda v: self.lbl_dist_val.setText(str(v)))
         c_header.addWidget(dist_lbl)
         c_header.addWidget(self.dist_slider)
@@ -706,7 +1117,7 @@ class FreqCheckerApp(QMainWindow):
         self.clarity_box.setVisible(False)
         
         hint = QLabel("Keys: 0–9 rate clarity instantly · T = 10 · N = not heard · R = replay · Esc = stop")
-        hint.setStyleSheet("color: #707580; font-size: 11px;")
+        hint.setStyleSheet("color: #7f7f7f; font-size: 11px;")
         hint.setAlignment(Qt.AlignCenter)
         tc_layout.addWidget(hint)
         
@@ -819,7 +1230,7 @@ class FreqCheckerApp(QMainWindow):
         title.setProperty("class", "title")
         btn_back = QPushButton("Return to Setup")
         btn_back.setProperty("class", "secondary")
-        btn_back.setIcon(get_svg_icon("arrow-left", color="#00A2FF"))
+        btn_back.setIcon(get_svg_icon("arrow-left", color="#d51535"))
         btn_back.setIconSize(QSize(14, 14))
         btn_back.clicked.connect(lambda: self._switch_page(PAGE_WIZARD))
         tc_layout.addWidget(title)
@@ -827,10 +1238,11 @@ class FreqCheckerApp(QMainWindow):
         tc_layout.addWidget(btn_back)
         layout.addWidget(top_card)
         
-        # Movable Splitter for Manual View
-        manual_splitter = QSplitter(Qt.Horizontal)
-        manual_splitter.setHandleWidth(8)
-        manual_splitter.setChildrenCollapsible(False)
+        # Movable Splitter for Manual View — responsive: horizontal on wide, vertical on narrow (resizeEvent toggles)
+        self.manual_splitter = QSplitter(Qt.Horizontal)
+        self.manual_splitter.setHandleWidth(8)
+        self.manual_splitter.setChildrenCollapsible(False)
+        manual_splitter = self.manual_splitter
         
         # Left Panel: Tone Frequency & Generation Controls
         card_left = QFrame()
@@ -881,7 +1293,7 @@ class FreqCheckerApp(QMainWindow):
         
         play_row = QHBoxLayout()
         self.btn_play_manual = QPushButton("Play Tone")
-        self.btn_play_manual.setIcon(get_svg_icon("play", color="#121212"))
+        self.btn_play_manual.setIcon(get_svg_icon("play", color="#ffffff"))
         self.btn_play_manual.setIconSize(QSize(16, 16))
         self.btn_play_manual.setStyleSheet("padding: 12px 28px; font-size: 14px; font-weight: 700;")
         self.btn_play_manual.clicked.connect(self._play_manual_tone)
@@ -914,7 +1326,7 @@ class FreqCheckerApp(QMainWindow):
             "- Upper-Mid (2-4 kHz): Presence & attack; ear is most sensitive here.\n"
             "- Highs (4-20 kHz): Air, cymbals, brilliance; tests tweeter fidelity."
         )
-        guide_text.setStyleSheet("color: #B0B0B0; font-size: 12px; line-height: 1.5;")
+        guide_text.setStyleSheet("color: #b1b1b1; font-size: 12px; line-height: 1.5;")
         guide_text.setWordWrap(True)
         cr_layout.addWidget(guide_text)
         cr_layout.addStretch()
@@ -952,7 +1364,8 @@ class FreqCheckerApp(QMainWindow):
         self.audio_engine.play_audio(
             audio,
             on_started=lambda: self.audio_bridge.playback_started.emit(freq),
-            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or "")
+            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": audio, "sample_rate": self.audio_engine.sample_rate}
         )
 
     # =========================================================================
@@ -972,7 +1385,7 @@ class FreqCheckerApp(QMainWindow):
         title.setProperty("class", "title")
         btn_back = QPushButton("Return to Setup")
         btn_back.setProperty("class", "secondary")
-        btn_back.setIcon(get_svg_icon("arrow-left", color="#00A2FF"))
+        btn_back.setIcon(get_svg_icon("arrow-left", color="#d51535"))
         btn_back.setIconSize(QSize(14, 14))
         btn_back.clicked.connect(lambda: self._switch_page(PAGE_WIZARD))
         tc_layout.addWidget(title)
@@ -980,10 +1393,11 @@ class FreqCheckerApp(QMainWindow):
         tc_layout.addWidget(btn_back)
         layout.addWidget(top_card)
         
-        # Movable Splitter for Sweep View
-        sweep_splitter = QSplitter(Qt.Horizontal)
-        sweep_splitter.setHandleWidth(8)
-        sweep_splitter.setChildrenCollapsible(False)
+        # Movable Splitter for Sweep View — responsive
+        self.sweep_splitter = QSplitter(Qt.Horizontal)
+        self.sweep_splitter.setHandleWidth(8)
+        self.sweep_splitter.setChildrenCollapsible(False)
+        sweep_splitter = self.sweep_splitter
         
         # Left Panel: Sweep Configuration & Controls
         card_left = QFrame()
@@ -1000,7 +1414,7 @@ class FreqCheckerApp(QMainWindow):
             "Plays a smooth 100 Hz -> 10,000 Hz continuous logarithmic sweep.\n"
             "Press Spacebar or the Mark button whenever you hear drops, rattles, or distortion."
         )
-        info.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        info.setStyleSheet("color: #b1b1b1; font-size: 12px;")
         info.setWordWrap(True)
         c_layout.addWidget(info)
         
@@ -1031,11 +1445,19 @@ class FreqCheckerApp(QMainWindow):
         self.btn_mark_sweep.setIconSize(QSize(16, 16))
         self.btn_mark_sweep.setStyleSheet(
             "padding: 12px 24px; font-size: 14px; font-weight: 700; "
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0077FF, stop:1 #00A2FF); color: #FFFFFF; border-radius: 9px;"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d51535, stop:1 #d51535); color: #FFFFFF; border-radius: 9px;"
         )
         self.btn_mark_sweep.setFocusPolicy(Qt.NoFocus)
         self.btn_mark_sweep.clicked.connect(self._mark_sweep_anomaly)
         self.btn_mark_sweep.setEnabled(False)
+
+        self.btn_retest_marks = QPushButton("Retest Marked Freqs")
+        self.btn_retest_marks.setProperty("class", "secondary")
+        self.btn_retest_marks.setIcon(get_svg_icon("zap", color="#d51535"))
+        self.btn_retest_marks.setIconSize(QSize(14, 14))
+        self.btn_retest_marks.setToolTip("Run adaptive ratings on each marked frequency through the guided test flow.")
+        self.btn_retest_marks.setEnabled(False)
+        self.btn_retest_marks.clicked.connect(self._start_sweep_retest)
         
         btn_stop_sw = QPushButton("Stop")
         btn_stop_sw.setProperty("class", "danger")
@@ -1047,6 +1469,7 @@ class FreqCheckerApp(QMainWindow):
         act_row.addWidget(self.btn_start_sweep)
         act_row.addWidget(self.btn_mark_sweep)
         act_row.addWidget(btn_stop_sw)
+        act_row.addWidget(self.btn_retest_marks)
         act_row.addStretch()
         c_layout.addLayout(act_row)
         
@@ -1068,7 +1491,7 @@ class FreqCheckerApp(QMainWindow):
         cr_layout.addWidget(sr_title)
         
         self.lbl_sweep_progress = QLabel("— Hz")
-        self.lbl_sweep_progress.setStyleSheet("font-size: 28px; font-weight: 800; color: #00E5FF;")
+        self.lbl_sweep_progress.setStyleSheet("font-size: 28px; font-weight: 800; color: #d51535;")
         cr_layout.addWidget(self.lbl_sweep_progress)
         
         self.txt_sweep_marks = QTextEdit()
@@ -1093,15 +1516,18 @@ class FreqCheckerApp(QMainWindow):
         ch_text = self.combo_sweep_ch.currentText()
         ch = "left" if "Left" in ch_text else ("right" if "Right" in ch_text else "both")
         self.sweep_marks = []
+        self._sync_sweep_marks_to_session()
         self._consecutive_stopped_ticks = 0
         self.sweep_start_time = None
         self.txt_sweep_marks.clear()
         self.btn_mark_sweep.setEnabled(True)
+        self.btn_retest_marks.setEnabled(False)
         audio = self.audio_engine.generate_log_sweep(100.0, 10000.0, duration_s=dur, channel=ch)
         self.audio_engine.play_audio(
             audio,
             on_started=lambda: self.audio_bridge.sweep_started.emit(),
-            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or "")
+            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": audio, "sample_rate": self.audio_engine.sample_rate}
         )
 
     def _on_sweep_started_ui(self):
@@ -1126,7 +1552,8 @@ class FreqCheckerApp(QMainWindow):
         ratio = min(1.0, elapsed / self.sweep_total_duration)
         cur_f = 100.0 * ((10000.0 / 100.0) ** ratio)
         self.lbl_sweep_progress.setText(f"~{cur_f:,.0f} Hz")
-        self.top_visualizer.set_playing_state(True, cur_f)
+        self._active_tone_freq = cur_f
+        self.top_visualizer.start_if_playing()
 
     def _mark_sweep_anomaly(self):
         if self.sweep_start_time is None:
@@ -1136,7 +1563,13 @@ class FreqCheckerApp(QMainWindow):
         ratio = min(1.0, elapsed / self.sweep_total_duration)
         cur_f = 100.0 * ((10000.0 / 100.0) ** ratio)
         self.sweep_marks.append(cur_f)
+        self._sync_sweep_marks_to_session()
+        self.btn_retest_marks.setEnabled(True)
         self.txt_sweep_marks.append(f"• Anomaly marked at ~{cur_f:,.0f} Hz (at {elapsed:.1f}s)")
+
+    def _sync_sweep_marks_to_session(self):
+        if self.session is not None:
+            self.session.sweep_marks_hz = list(self.sweep_marks)
 
     def _on_space_sweep(self):
         if self.stack.currentIndex() == PAGE_SWEEP and self.audio_engine.is_playing():
@@ -1145,9 +1578,38 @@ class FreqCheckerApp(QMainWindow):
     def _stop_sweep(self):
         self.sweep_timer.stop()
         self.audio_engine.stop_playback()
+        self.top_visualizer.stop_and_clear()
         self.btn_mark_sweep.setEnabled(False)
+        self.btn_retest_marks.setEnabled(bool(self.sweep_marks))
         self.lbl_sweep_progress.setText("Sweep Complete")
-        self.top_visualizer.set_playing_state(False)
+
+    def _start_sweep_retest(self):
+        if not self.sweep_marks:
+            return
+        freqs = sorted({practical_round_freq(f) for f in self.sweep_marks})[:8]
+        ch_text = self.combo_sweep_ch.currentText()
+        ch = "left" if "Left" in ch_text else ("right" if "Right" in ch_text else "both")
+        if self.session is None:
+            self.session = Session(
+                mode="sweep",
+                sample_rate=self.audio_engine.sample_rate,
+                duration_per_tone=2.0,
+                peak_level=0.4,
+                fxsound_disabled=self.chk_fxsound.isChecked(),
+                enhancements_disabled=self.chk_enhancements.isChecked(),
+                output_device_name=self.device_combo.currentText(),
+                channel_mode=ch
+            )
+            self.start_time = time.time()
+        self.session.mode = "sweep"
+        self.session.sweep_marks_hz = list(self.sweep_marks)
+        self.controller = DiagnosticController(mode="quick")
+        self.scheduler = TestScheduler(mode="quick")
+        self._manual_retest_freqs = freqs
+        self.scheduler.manual_mode = True
+        self.blind_mode = self.chk_blind.isChecked()
+        self._sweep_retest_active = True
+        self._start_channel_test(ch)
 
     # =========================================================================
     # 5. REAL MUSIC PLAYBACK & A/B SPEAKER COMPARISON VIEW
@@ -1169,7 +1631,7 @@ class FreqCheckerApp(QMainWindow):
         title.setProperty("class", "title")
         btn_back = QPushButton("Return to Setup")
         btn_back.setProperty("class", "secondary")
-        btn_back.setIcon(get_svg_icon("arrow-left", color="#00A2FF"))
+        btn_back.setIcon(get_svg_icon("arrow-left", color="#d51535"))
         btn_back.setIconSize(QSize(14, 14))
         btn_back.clicked.connect(lambda: self._switch_page(PAGE_WIZARD))
         top_row.addWidget(title)
@@ -1181,7 +1643,7 @@ class FreqCheckerApp(QMainWindow):
             "Play your own music through one speaker at a time to listen for subtle rattling, buzzing, and balance differences.\n"
             "- Pure tones are required for calibrated diagnostic detection; real music provides real-world subjective verification."
         )
-        desc.setStyleSheet("color: #B0B0B0; font-size: 12px;")
+        desc.setStyleSheet("color: #b1b1b1; font-size: 12px;")
         desc.setWordWrap(True)
         c.addWidget(desc)
         
@@ -1189,19 +1651,19 @@ class FreqCheckerApp(QMainWindow):
         file_row = QHBoxLayout()
         self.btn_music_load = QPushButton("Load Music Track...")
         self.btn_music_load.setProperty("class", "secondary")
-        self.btn_music_load.setIcon(get_svg_icon("folder", color="#00A2FF"))
+        self.btn_music_load.setIcon(get_svg_icon("folder", color="#d51535"))
         self.btn_music_load.setIconSize(QSize(16, 16))
         self.btn_music_load.setFixedHeight(36)
         self.btn_music_load.clicked.connect(self._load_music_file)
         self.lbl_music_file = QLabel("No track loaded")
-        self.lbl_music_file.setStyleSheet("color: #888888; font-size: 12px;")
+        self.lbl_music_file.setStyleSheet("color: #7f7f7f; font-size: 12px;")
         file_row.addWidget(self.btn_music_load)
         file_row.addWidget(self.lbl_music_file, 1)
         c.addLayout(file_row)
         
         if not SOUNDFILE_AVAILABLE:
             sf_note = QLabel("[Note] Music playback requires the optional 'soundfile' package (pip install soundfile).")
-            sf_note.setStyleSheet("color: #FF5252; font-size: 11px; font-weight: 600;")
+            sf_note.setStyleSheet("color: #ff4d4f; font-size: 11px; font-weight: 600;")
             c.addWidget(sf_note)
         
         # Channel Selection Row
@@ -1230,7 +1692,7 @@ class FreqCheckerApp(QMainWindow):
         self.slider_music_vol.setValue(60)
         self.slider_music_vol.sliderReleased.connect(self._on_music_volume_released)
         self.lbl_music_vol = QLabel("60%")
-        self.lbl_music_vol.setStyleSheet("color: #00A2FF; font-weight: 700; font-size: 12px;")
+        self.lbl_music_vol.setStyleSheet("color: #d51535; font-weight: 700; font-size: 12px;")
         self.slider_music_vol.valueChanged.connect(lambda v: self.lbl_music_vol.setText(f"{v}%"))
         vol_row.addWidget(self.slider_music_vol, 1)
         vol_row.addWidget(self.lbl_music_vol)
@@ -1239,7 +1701,7 @@ class FreqCheckerApp(QMainWindow):
         # Position & Seek Slider
         pos_row = QHBoxLayout()
         self.lbl_music_pos = QLabel("0:00 / 0:00")
-        self.lbl_music_pos.setStyleSheet("font-size: 15px; font-weight: 800; color: #00E5FF;")
+        self.lbl_music_pos.setStyleSheet("font-size: 15px; font-weight: 800; color: #d51535;")
         self.slider_music_pos = QSlider(Qt.Horizontal)
         self.slider_music_pos.setRange(0, 1000)
         self.slider_music_pos.setValue(0)
@@ -1252,7 +1714,7 @@ class FreqCheckerApp(QMainWindow):
         # Transport Buttons with SVG Icons
         trans_row = QHBoxLayout()
         self.btn_music_play = QPushButton("Play Track")
-        self.btn_music_play.setIcon(get_svg_icon("play", color="#121212"))
+        self.btn_music_play.setIcon(get_svg_icon("play", color="#ffffff"))
         self.btn_music_play.setIconSize(QSize(16, 16))
         self.btn_music_play.setStyleSheet("padding: 12px 28px; font-size: 14px; font-weight: 700;")
         self.btn_music_play.setEnabled(False)
@@ -1272,11 +1734,11 @@ class FreqCheckerApp(QMainWindow):
         c.addLayout(trans_row)
         
         self.lbl_music_status = QLabel("")
-        self.lbl_music_status.setStyleSheet("color: #FF5252; font-size: 11px;")
+        self.lbl_music_status.setStyleSheet("color: #ff4d4f; font-size: 11px;")
         c.addWidget(self.lbl_music_status)
         
         hint_m = QLabel("Tip: Click 'Left' and 'Right' during music playback to instantly isolate and A/B compare each speaker.")
-        hint_m.setStyleSheet("color: #707580; font-size: 11px;")
+        hint_m.setStyleSheet("color: #7f7f7f; font-size: 11px;")
         c.addWidget(hint_m)
         
         layout.addWidget(card)
@@ -1364,7 +1826,8 @@ class FreqCheckerApp(QMainWindow):
         self.audio_engine.play_audio(
             seg,
             on_started=lambda: self.audio_bridge.music_started.emit(),
-            on_finished=lambda ok, err: self.audio_bridge.music_finished.emit(ok, err or "")
+            on_finished=lambda ok, err: self.audio_bridge.music_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": seg, "sample_rate": self.audio_engine.sample_rate}
         )
 
     def _music_pause(self):
@@ -1373,7 +1836,7 @@ class FreqCheckerApp(QMainWindow):
         self._music_active = False
         self.music_timer.stop()
         self.btn_music_play.setText("Play Track")
-        self.btn_music_play.setIcon(get_svg_icon("play", color="#121212"))
+        self.btn_music_play.setIcon(get_svg_icon("play", color="#ffffff"))
 
     def _music_stop(self):
         self.audio_engine.stop_playback()
@@ -1384,8 +1847,8 @@ class FreqCheckerApp(QMainWindow):
         self.slider_music_pos.setValue(0)
         self.lbl_music_pos.setText(f"0:00 / {_fmt_time(self._music_total_sec)}")
         self.btn_music_play.setText("Play Track")
-        self.btn_music_play.setIcon(get_svg_icon("play", color="#121212"))
-        self.top_visualizer.set_playing_state(False)
+        self.btn_music_play.setIcon(get_svg_icon("play", color="#ffffff"))
+        self.top_visualizer.stop_and_clear()
 
     def _music_restart(self):
         self.audio_engine.stop_playback()
@@ -1397,8 +1860,8 @@ class FreqCheckerApp(QMainWindow):
         self.music_playing = True
         self.music_timer.start()
         self.btn_music_play.setText("Pause Track")
-        self.btn_music_play.setIcon(get_svg_icon("pause", color="#121212"))
-        self.top_visualizer.set_playing_state(True, 1000.0)
+        self.btn_music_play.setIcon(get_svg_icon("pause", color="#ffffff"))
+        self.top_visualizer.start_if_playing()
 
     def _on_music_finished_ui(self, ok: bool, err_msg: str):
         was_active = self._music_active
@@ -1406,8 +1869,8 @@ class FreqCheckerApp(QMainWindow):
         self._music_active = False
         self.music_timer.stop()
         self.btn_music_play.setText("Play Track")
-        self.btn_music_play.setIcon(get_svg_icon("play", color="#121212"))
-        self.top_visualizer.set_playing_state(False)
+        self.btn_music_play.setIcon(get_svg_icon("play", color="#ffffff"))
+        self.top_visualizer.stop_and_clear()
         if not ok and err_msg and was_active:
             self.lbl_music_status.setText(f"[Alert] Playback error: {err_msg}")
 
@@ -1469,8 +1932,9 @@ class FreqCheckerApp(QMainWindow):
         self.btn_filter_both.clicked.connect(lambda: self._set_res_filter("both"))
         self.btn_filter_left.clicked.connect(lambda: self._set_res_filter("left"))
         self.btn_filter_right.clicked.connect(lambda: self._set_res_filter("right"))
+        self._res_filter = "both"
         btn_new_test = QPushButton("Start New Test")
-        btn_new_test.setIcon(get_svg_icon("arrow-right", color="#121212"))
+        btn_new_test.setIcon(get_svg_icon("arrow-right", color="#ffffff"))
         btn_new_test.setIconSize(QSize(16, 16))
         btn_new_test.clicked.connect(lambda: self._switch_page(PAGE_WIZARD))
         tc_layout.addWidget(self.lbl_res_title)
@@ -1481,60 +1945,143 @@ class FreqCheckerApp(QMainWindow):
         tc_layout.addWidget(btn_new_test)
         layout.addWidget(top_card)
         self.results_plot = LogFrequencyPlotWidget()
-        self.results_plot.setFixedHeight(240)
+        self.results_plot.setFixedHeight(220)
+        self.results_plot.setMinimumHeight(160)
+        self.results_plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.results_plot.point_clicked.connect(self._on_plot_point_clicked)
         layout.addWidget(self.results_plot, 1)
-        split = QSplitter(Qt.Horizontal)
+        self.results_splitter = QSplitter(Qt.Horizontal)
+        self.results_splitter.setHandleWidth(8)
+        self.results_splitter.setChildrenCollapsible(False)
+        self.results_splitter.setStyleSheet("QSplitter::handle { background: transparent; }")
+        split = self.results_splitter
         self.txt_report = QTextEdit()
         self.txt_report.setReadOnly(True)
+        # ensure report has sensible minimum to keep export panel visible on 860px min window
+        self.txt_report.setMinimumWidth(420)
         split.addWidget(self.txt_report)
         right_panel = QFrame()
         right_panel.setProperty("class", "card")
+        # FxSound panel: tighter 8px control bg but export needs readable buttons
+        right_panel.setMinimumWidth(340)
+        right_panel.setMaximumWidth(420)
         rp_layout = QVBoxLayout(right_panel)
-        rp_layout.setContentsMargins(16, 16, 16, 16)
+        rp_layout.setContentsMargins(18, 18, 18, 18)
         rp_layout.setSpacing(10)
         rp_title = QLabel("Export & Share")
         rp_title.setProperty("class", "section-title")
         rp_layout.addWidget(rp_title)
-        btn_csv = QPushButton("Export Raw CSV Data")
-        btn_csv.setProperty("class", "secondary")
-        btn_csv.setIcon(get_svg_icon("download", color="#00A2FF"))
-        btn_csv.setIconSize(QSize(16, 16))
-        btn_csv.clicked.connect(self._export_csv)
-        btn_json = QPushButton("Save Complete Session JSON")
-        btn_json.setProperty("class", "secondary")
-        btn_json.setIcon(get_svg_icon("download", color="#00A2FF"))
-        btn_json.setIconSize(QSize(16, 16))
-        btn_json.clicked.connect(self._save_session_json)
-        btn_txt = QPushButton("Export Diagnostic Report (.txt)")
-        btn_txt.setProperty("class", "secondary")
-        btn_txt.setIcon(get_svg_icon("file-text", color="#00A2FF"))
-        btn_txt.setIconSize(QSize(16, 16))
-        btn_txt.clicked.connect(self._export_report_txt)
-        btn_load = QPushButton("Load Previous Session JSON")
-        btn_load.setProperty("class", "secondary")
-        btn_load.setIcon(get_svg_icon("folder", color="#00A2FF"))
-        btn_load.setIconSize(QSize(16, 16))
-        btn_load.clicked.connect(self._load_session_json)
-        rp_layout.addWidget(btn_csv)
-        rp_layout.addWidget(btn_json)
-        rp_layout.addWidget(btn_txt)
-        rp_layout.addWidget(btn_load)
+        self.btn_csv = QPushButton("Export Raw CSV Data")
+        self.btn_csv.setProperty("class", "secondary")
+        self.btn_csv.setIcon(get_svg_icon("download", color="#d51535"))
+        self.btn_csv.setIconSize(QSize(16, 16))
+        self.btn_csv.setMinimumHeight(36)
+        self.btn_csv.clicked.connect(self._export_csv)
+        self.btn_json = QPushButton("Save Complete Session JSON")
+        self.btn_json.setProperty("class", "secondary")
+        self.btn_json.setIcon(get_svg_icon("download", color="#d51535"))
+        self.btn_json.setIconSize(QSize(16, 16))
+        self.btn_json.setMinimumHeight(36)
+        self.btn_json.clicked.connect(self._save_session_json)
+        self.btn_txt = QPushButton("Export Premium Report (.html)")
+        self.btn_txt.setProperty("class", "secondary")
+        self.btn_txt.setIcon(get_svg_icon("file-text", color="#d51535"))
+        self.btn_txt.setIconSize(QSize(16, 16))
+        self.btn_txt.setMinimumHeight(36)
+        self.btn_txt.setToolTip("Premium, print-ready HTML report with FxSound styling — opens in browser, Save as PDF from there")
+        self.btn_txt.clicked.connect(self._export_report_html)
+        self.btn_load = QPushButton("Load Previous Session JSON")
+        self.btn_load.setProperty("class", "secondary")
+        self.btn_load.setIcon(get_svg_icon("folder", color="#d51535"))
+        self.btn_load.setIconSize(QSize(16, 16))
+        self.btn_load.setMinimumHeight(36)
+        self.btn_load.clicked.connect(self._load_session_json)
+        for b in (self.btn_csv, self.btn_json, self.btn_txt, self.btn_load):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        rp_layout.addWidget(self.btn_csv)
+        rp_layout.addWidget(self.btn_json)
+        rp_layout.addWidget(self.btn_txt)
+        rp_layout.addWidget(self.btn_load)
+        rp_sep = QFrame()
+        rp_sep.setFrameShape(QFrame.HLine)
+        rp_sep.setStyleSheet(f"color: {get_fx_color('card_border', True)}; background-color: {get_fx_color('card_border', True)}; max-height: 1px; border: none;")
+        rp_layout.addWidget(rp_sep)
+        self.btn_stress = QPushButton("Stress Replay Worst Point (+75%)")
+        self.btn_stress.setProperty("class", "secondary")
+        self.btn_stress.setIcon(get_svg_icon("volume-2", color="#d51535"))
+        self.btn_stress.setIconSize(QSize(16, 16))
+        self.btn_stress.setMinimumHeight(36)
+        self.btn_stress.setToolTip("Replays the worst detected frequency ~75% louder. If buzz or distortion appears only at this level, the fault is likely level-dependent (amplifier/driver excursion), not a frequency dip.")
+        self.btn_stress.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_stress.clicked.connect(self._stress_replay_worst_point)
+        rp_layout.addWidget(self.btn_stress)
+        self.lbl_stress_note = QLabel("")
+        self.lbl_stress_note.setProperty("class", "hint")
+        self.lbl_stress_note.setWordWrap(True)
+        rp_layout.addWidget(self.lbl_stress_note)
         rp_layout.addStretch()
         split.addWidget(right_panel)
-        split.setSizes([680, 320])
+        # Keep export panel always visible: 61%/39% split, stretch 3:2
+        split.setSizes([620, 360])
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        # Persist splitter; ensure at least 340px for export on 860 min width
+        split.setCollapsible(0, False)
+        split.setCollapsible(1, False)
         layout.addWidget(split, 1)
         self.stack.addWidget(self.results_page)
 
     def _set_res_filter(self, channel: str):
+        self._res_filter = channel
         self.results_plot.set_channel_filter(channel)
+        for btn, name in (
+            (self.btn_filter_both, "both"),
+            (self.btn_filter_left, "left"),
+            (self.btn_filter_right, "right")
+        ):
+            btn.setProperty("class", "toggle-yes-active" if name == channel else "secondary")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _stress_replay_worst_point(self):
+        worst_reg, worst_meas = self._find_global_worst_point()
+        if worst_reg is None or worst_meas is None:
+            self.lbl_stress_note.setText("No anomaly region detected in this session.")
+            return
+        ch = worst_reg.channel if worst_reg.channel in ("left", "right") else "both"
+        freq = worst_meas.frequency_hz
+        tone = self.audio_engine.generate_sine_tone(freq, duration_s=2.5, peak=0.7, channel=ch)
+        self.audio_engine.play_audio(
+            tone,
+            on_started=lambda: self.audio_bridge.playback_started.emit(freq),
+            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": tone, "sample_rate": self.audio_engine.sample_rate}
+        )
+        self.lbl_stress_note.setText(
+            f"Replaying ~{freq:,.0f} Hz on {ch.upper()} at +75% level. "
+            "Buzz/distortion only now? Likely level-dependent. Clean but quiet? Frequency dip confirmed."
+        )
+
+    def _find_global_worst_point(self) -> Tuple[Optional[Region], Optional[Measurement]]:
+        best_reg: Optional[Region] = None
+        best_m: Optional[Measurement] = None
+        for res in self.session.channel_results.values():
+            for reg in res.regions:
+                if reg.category == RegionCategory.EXPECTED_LOW_ROLLOFF:
+                    continue
+                if best_reg is None or reg.min_quality < best_reg.min_quality:
+                    best_reg = reg
+        if best_reg is not None and best_reg.points:
+            best_m = min(best_reg.points, key=lambda p: p.quality)
+        return best_reg, best_m
 
     def _on_plot_point_clicked(self, freq: float, channel: str):
         tone = self.audio_engine.generate_sine_tone(freq, duration_s=1.5, channel=channel)
         self.audio_engine.play_audio(
             tone,
             on_started=lambda: self.audio_bridge.playback_started.emit(freq),
-            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or "")
+            on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+            spectrum_meta={"buffer": tone, "sample_rate": self.audio_engine.sample_rate}
         )
 
     def _export_csv(self):
@@ -1561,10 +2108,40 @@ class FreqCheckerApp(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
+    def _export_report_html(self):
+        if not self.session:
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export Premium Report",
+            f"FreqChecker_Report_{self.session.session_id}.html",
+            "HTML Report (*.html);;Text Report (*.txt)"
+        )
+        if not path:
+            return
+        try:
+            # Use selected filter to decide format, but also honor explicit extension
+            is_html = "HTML" in selected or path.lower().endswith((".html", ".htm"))
+            if is_html:
+                if not path.lower().endswith((".html", ".htm")):
+                    path += ".html"
+                html = self.session.generate_html_report()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                QMessageBox.information(self, "Export", f"Premium HTML report saved to:\n{path}\n\nOpen in browser -> Print -> Save as PDF for a premium PDF.")
+            else:
+                if not path.lower().endswith(".txt"):
+                    path += ".txt"
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.session.generate_report())
+                QMessageBox.information(self, "Export", f"Text report saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    # kept for compatibility (plain text export)
     def _export_report_txt(self):
         if not self.session:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Report", "diagnostic_report.txt", "Text Files (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Text Report", "diagnostic_report.txt", "Text Files (*.txt)")
         if path:
             try:
                 with open(path, "w", encoding="utf-8") as f:
@@ -1600,6 +2177,13 @@ class FreqCheckerApp(QMainWindow):
         self.current_channel = self.channels_to_test[0]
         self.controller = DiagnosticController(mode=mode)
         self.scheduler = TestScheduler(mode=mode)
+        # Handle sub-bass inclusion for quick mode (addresses "125Hz not audible" feedback)
+        if mode == "quick" and hasattr(self, "chk_include_subbass") and self.chk_include_subbass.isChecked():
+            subbass_quick = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+            self.controller.grid = subbass_quick
+            self.scheduler.grid = subbass_quick
+        self.blind_mode = self.chk_blind.isChecked()
+        self._sweep_retest_active = False
         self.start_time = time.time()
         dev_name = self.device_combo.currentText()
         self.session = Session(
@@ -1617,23 +2201,37 @@ class FreqCheckerApp(QMainWindow):
     def _start_channel_test(self, channel: str):
         self.current_channel = channel
         self.scheduler.start_channel(channel)
+        if self.scheduler.manual_mode:
+            self.scheduler.load_manual_queue(self._manual_retest_freqs)
+        self._progress_floor = 0
+        self._max_queue_len = 0
         self._switch_page(PAGE_TESTING)
         self._update_channel_badge()
         self._present_next_test()
 
     def _update_channel_badge(self):
         ch = self.current_channel.upper()
+        # FxSound-exact: Left = primary_accent (crimson/cyan), Right = cyan_secondary
+        left_bg = get_fx_color("primary_accent", self.is_dark_theme)
+        right_bg = get_fx_color("cyan_secondary", self.is_dark_theme)
         if ch == "LEFT":
             self.lbl_channel_badge.setText("LEFT CHANNEL")
             self.lbl_channel_badge.setStyleSheet(
-                "background: #00E5FF; color: #14161A; padding: 5px 14px; border-radius: 7px; "
-                "font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
+                f"background: {left_bg}; color: #ffffff; padding: 5px 14px; border-radius: 7px; "
+                f"font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
+            )
+        elif ch == "RIGHT":
+            self.lbl_channel_badge.setText("RIGHT CHANNEL")
+            right_tc = "#0f0f0f" if self.is_dark_theme else "#ffffff"
+            self.lbl_channel_badge.setStyleSheet(
+                f"background: {right_bg}; color: {right_tc}; padding: 5px 14px; border-radius: 7px; "
+                f"font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
             )
         else:
-            self.lbl_channel_badge.setText("RIGHT CHANNEL")
+            self.lbl_channel_badge.setText("BOTH CHANNELS")
             self.lbl_channel_badge.setStyleSheet(
-                "background: #00A2FF; color: #FFFFFF; padding: 5px 14px; border-radius: 7px; "
-                "font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
+                f"background: {left_bg}; color: #ffffff; padding: 5px 14px; border-radius: 7px; "
+                f"font-weight: 800; font-size: 11px; letter-spacing: 0.8px;"
             )
 
     def _present_next_test(self):
@@ -1644,7 +2242,12 @@ class FreqCheckerApp(QMainWindow):
         freq = item["freq"]
         stage = item["stage"]
         is_control = item.get("is_control", False)
-        self.lbl_frequency.setText(f"{freq:,.1f} Hz" if freq < 1000 else f"{freq:,.0f} Hz")
+        if self.blind_mode and not is_control:
+            self.lbl_frequency.setText("Hidden")
+            self.lbl_frequency.setToolTip("Blind Mode active - the frequency is revealed in the final report.")
+        else:
+            self.lbl_frequency.setText(f"{freq:,.1f} Hz" if freq < 1000 else f"{freq:,.0f} Hz")
+            self.lbl_frequency.setToolTip("")
         queue_len = len(self.scheduler.test_queue)
         cur_idx = self.scheduler.current_idx
         if is_control:
@@ -1652,7 +2255,10 @@ class FreqCheckerApp(QMainWindow):
         else:
             stage_title = stage.replace("_", " ").title()
             self.lbl_stage_info.setText(f"{stage_title} · {cur_idx + 1}/{queue_len}")
-        pct = int(100.0 * (cur_idx / float(max(1, queue_len))))
+        self._max_queue_len = max(self._max_queue_len, queue_len)
+        pct = int(100.0 * (cur_idx / float(max(1, self._max_queue_len))))
+        pct = max(pct, self._progress_floor)
+        self._progress_floor = pct
         self.progress_bar.setValue(pct)
         remaining = max(0, queue_len - cur_idx)
         self.lbl_remaining.setText(f"~{remaining} left")
@@ -1688,8 +2294,17 @@ class FreqCheckerApp(QMainWindow):
             self.audio_engine.play_audio(
                 tone,
                 on_started=lambda: self.audio_bridge.playback_started.emit(freq),
-                on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or "")
+                on_finished=lambda ok, err: self.audio_bridge.playback_finished.emit(ok, err or ""),
+                spectrum_meta={"buffer": tone, "sample_rate": self.audio_engine.sample_rate}
             )
+
+    def _undo_last_rating(self):
+        if self.stack.currentIndex() != PAGE_TESTING:
+            return
+        if not self.scheduler.active_measurements or self.scheduler.current_idx <= 0:
+            return
+        self.scheduler.undo_last_measurement()
+        self._present_next_test()
 
     def _handle_channel_phase_transition(self):
         action, reason_or_status, count = self.scheduler.handle_phase_transition(self.controller)
@@ -1698,15 +2313,17 @@ class FreqCheckerApp(QMainWindow):
         elif action == "CONTINUE":
             self._present_next_test()
         else:
-            self._finalize_channel(is_global_problem=False)
+            result_key = "sweep" if self._sweep_retest_active else None
+            self._finalize_channel(is_global_problem=False, result_key=result_key)
 
-    def _finalize_channel(self, is_global_problem: bool = False, global_problem_type: str = ""):
+    def _finalize_channel(self, is_global_problem: bool = False, global_problem_type: str = "", result_key: Optional[str] = None):
         active_meas = self.scheduler.active_measurements
         anchor = self.controller.rating_anchor(active_meas)
         controls_ok = self.controller.check_control_stability(active_meas)
-        regions = self.controller.detect_regions(active_meas, self.current_channel)
+        analyze_regions = not is_global_problem and not self._sweep_retest_active
+        regions = self.controller.detect_regions(active_meas, self.current_channel) if analyze_regions else []
         scored_regions = []
-        if not is_global_problem:
+        if analyze_regions:
             for reg in regions:
                 reg = self.controller.expand_region_boundaries(reg, active_meas)
                 scored = self.controller.score_region(
@@ -1720,7 +2337,7 @@ class FreqCheckerApp(QMainWindow):
         avg_clarity = (sum(m.clarity for m in valid_m) / float(len(valid_m))) if valid_m else 0.0
         res = ChannelResult(
             channel=self.current_channel,
-            measurements=active_meas,
+            measurements=list(active_meas),
             regions=scored_regions,
             avg_clarity=round(avg_clarity, 1),
             rating_anchor=round(anchor, 1),
@@ -1728,7 +2345,11 @@ class FreqCheckerApp(QMainWindow):
             global_problem_type=global_problem_type,
             is_control_unstable=(not controls_ok)
         )
-        self.session.channel_results[self.current_channel] = res
+        self.session.channel_results[result_key or self.current_channel] = res
+        if result_key == "sweep":
+            self._finish_all_tests()
+            return
+        self._sweep_retest_active = False
         self.channel_idx += 1
         if self.channel_idx < len(self.channels_to_test):
             self._start_channel_test(self.channels_to_test[self.channel_idx])
@@ -1751,8 +2372,13 @@ class FreqCheckerApp(QMainWindow):
             left_res.regions,
             right_res.regions
         )
-        report_text = self.session.generate_report()
-        self.txt_report.setPlainText(report_text)
+        # Premium in-app rendering: try HTML (rich) with fallback to plain if renderer fails
+        try:
+            html = self.session.generate_html_report()
+            self.txt_report.setHtml(html)
+        except Exception:
+            report_text = self.session.generate_report()
+            self.txt_report.setPlainText(report_text)
         self._switch_page(PAGE_RESULTS)
 
     def _stop_current_test(self):
@@ -1763,19 +2389,35 @@ class FreqCheckerApp(QMainWindow):
         elif page == PAGE_MUSIC:
             self._music_stop()
         elif page == PAGE_TESTING:
-            reply = QMessageBox.question(
-                self, "Stop Diagnostic Test",
-                "Are you sure you want to stop the test and return to setup?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self._switch_page(PAGE_WIZARD)
+            if not self._offer_partial_save():
+                return
+            self._switch_page(PAGE_WIZARD)
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--frameless", action="store_true", help="(Default) Use FxSound-exact frameless chrome")
+    parser.add_argument("--framed", action="store_true", help="Use the native OS window title bar instead of the FxSound chrome")
+    parser.add_argument("--light", action="store_true", help="Start in light theme")
+    args, _ = parser.parse_known_args()
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_THEME_QSS)
-    window = FreqCheckerApp()
+    fx_theme.load_app_fonts()
+    is_dark_initial = not args.light
+    fx_theme.set_theme("dark" if is_dark_initial else "light")
+    app.setStyleSheet(fx_theme.get_qss(is_dark_initial))
+    frameless = not args.framed
+    window = FreqCheckerApp(frameless=frameless)
+    window.is_dark_theme = is_dark_initial
+    # ensure toggle button text matches initial
+    try:
+        accent = get_fx_color("primary_accent", is_dark_initial)
+        window.btn_theme_toggle.setText("Dark Mode" if is_dark_initial else "Light Mode")
+        window.btn_theme_toggle.setIcon(get_svg_icon("moon" if is_dark_initial else "sun", color=accent))
+        if hasattr(window, "_title_bar"):
+            window._title_bar.update_theme(is_dark_initial)
+    except Exception:
+        pass
     window.show()
     sys.exit(app.exec())
 

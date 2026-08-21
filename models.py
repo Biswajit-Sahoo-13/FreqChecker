@@ -21,7 +21,6 @@ class Stage:
     CONTROL = "control"
     RETEST = "retest"
     REFINE = "refine"
-    REGION_VERIFY = "region_verify"
     MANUAL = "manual"
     SWEEP = "sweep"
 
@@ -46,7 +45,6 @@ class Measurement:
     heard: bool
     clarity: int  # 0 to 10
     distortion: Optional[int] = None  # 0 to 10
-    loudness_relative: Optional[str] = "same"  # softer, same, louder
     quality: float = 0.0
     classification: str = Classification.GOOD
     effective_classification: Optional[str] = None
@@ -168,7 +166,6 @@ class Session:
     sample_rate: int = 48000
     duration_per_tone: float = 2.0
     peak_level: float = 0.4
-    system_volume: str = "45% (Nominal)"
     fxsound_disabled: bool = True
     enhancements_disabled: bool = True
     output_device_name: str = "Default Audio Device"
@@ -177,6 +174,7 @@ class Session:
     channel_results: Dict[str, ChannelResult] = field(default_factory=dict)
     cross_channel_findings: str = ""
     elapsed_seconds: float = 0.0
+    sweep_marks_hz: List[float] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -225,7 +223,7 @@ class Session:
         writer = csv.writer(output)
         writer.writerow([
             "session_id", "timestamp", "channel", "frequency_hz", "stage",
-            "heard", "clarity", "distortion", "loudness_relative", "quality",
+            "heard", "clarity", "distortion", "quality",
             "classification", "is_retest", "is_control", "input_error"
         ])
         for ch, res in self.channel_results.items():
@@ -233,7 +231,7 @@ class Session:
                 writer.writerow([
                     self.session_id, m.timestamp, m.channel, f"{m.frequency_hz:.1f}", m.stage,
                     1 if m.heard else 0, m.clarity, m.distortion if m.distortion is not None else "",
-                    m.loudness_relative or "same", f"{m.quality:.2f}", m.classification,
+                    f"{m.quality:.2f}", m.classification,
                     1 if m.is_retest else 0, 1 if m.is_control else 0, 1 if m.input_error else 0
                 ])
         return output.getvalue()
@@ -247,7 +245,6 @@ class Session:
         lines.append(f"Date & Time:        {self.created_at}")
         lines.append(f"Mode:               {self.mode.title()} Test")
         lines.append(f"Output Device:      {self.output_device_name}")
-        lines.append(f"Session Volume:     {self.system_volume} (Nominal pre-test setting)")
         enh_status = "Disabled (Standard Pure Output)" if (self.fxsound_disabled and self.enhancements_disabled) else "Active / Potentially Altered"
         lines.append(f"Audio Enhancements: {enh_status}")
         
@@ -260,8 +257,11 @@ class Session:
 
         all_regions = []
         for ch, res in self.channel_results.items():
-            ch_name = ch.upper()
-            lines.append(f"\n--- [{ch_name} SPEAKER CHANNEL] ---")
+            if ch == "sweep":
+                ch_name = "SWEEP MARKER RETESTS"
+            else:
+                ch_name = ch.upper() + " SPEAKER CHANNEL"
+            lines.append(f"\n--- [{ch_name}] ---")
             lines.append(f"Average Perceived Clarity:  {res.avg_clarity:.1f} / 10")
             lines.append(f"Rater Calibration Baseline: {res.rating_anchor:.1f} / 10 (calibrated from 1 kHz reference controls)")
             if res.rating_anchor < 5.0 and not res.is_global_problem:
@@ -289,6 +289,21 @@ class Session:
             if res.is_control_unstable:
                 lines.append("  [*] Note: Inconsistent responses detected on periodic 1 kHz control tones.")
                 lines.append("      Confidence is moderately reduced (possible listener fatigue or volume shift).")
+
+            if ch == "sweep":
+                if not res.measurements:
+                    lines.append("  [OK] No sweep marker retests were recorded.")
+                else:
+                    lines.append("  Subjective ratings at user-marked sweep anomaly frequencies:")
+                    for m in res.measurements:
+                        verdict = "audible" if m.heard else "NOT audible"
+                        lines.append(
+                            f"    - ~{practical_round_freq(m.frequency_hz):,.0f} Hz: {verdict}"
+                            + (f", clarity {m.clarity}/10" if m.heard else "")
+                        )
+                    lines.append("  [Note] Markers reflect subjective impressions during a fast sweep;")
+                    lines.append("         ratings above are calibrated re-tests at those exact frequencies.")
+                continue
 
             if not res.regions:
                 lines.append("  [OK] No significant frequency response anomalies detected.")
@@ -343,4 +358,281 @@ class Session:
         lines.append("5. For single-channel dips, verify with headphones to rule out one-sided hearing differences.")
         lines.append("=" * 66)
         return "\n".join(lines)
+
+    def generate_html_report(self) -> str:
+        """Premium HTML report — FxSound-inspired, print-ready, no external assets."""
+        import html as _html
+        def _esc(s: Any) -> str:
+            return _html.escape(str(s))
+        def _sev_color(sev: str) -> str:
+            s = sev.lower()
+            if s == "strong": return "#d51535"
+            if s == "moderate": return "#fa8c16"
+            if s == "minor": return "#faad14"
+            if s == "uncertain": return "#8c8c8c"
+            if "roll-off" in s.lower(): return "#595959"
+            if "no significant" in s.lower(): return "#52c41a"
+            return "#595959"
+        def _cat_label(cat: str) -> str:
+            return cat.replace("_", " ").title()
+        def _cat_style(cat: str) -> str:
+            if cat == RegionCategory.EXPECTED_LOW_ROLLOFF: return "background:#f5f5f5; color:#595959; border:1px solid #e8e8e8;"
+            if cat == RegionCategory.PERCEIVED_ANOMALY_HIGH_CONFIDENCE: return "background:#fff1f0; color:#a8071a; border:1px solid #ffccc7;"
+            if cat == RegionCategory.PERCEIVED_ANOMALY_MEDIUM_CONFIDENCE: return "background:#fff7e6; color:#ad4e00; border:1px solid #ffd591;"
+            if cat == RegionCategory.PERCEIVED_ANOMALY_LOW_CONFIDENCE: return "background:#fffbe6; color:#ad6800; border:1px solid #ffe58f;"
+            if cat == RegionCategory.LIKELY_DSP_OR_ENHANCEMENT_EFFECT: return "background:#f9f0ff; color:#391085; border:1px solid #d3adf7;"
+            if cat == RegionCategory.LIKELY_LEVEL_DEPENDENT_DISTORTION: return "background:#fff2e8; color:#873800; border:1px solid #ffbb96;"
+            if cat == RegionCategory.INCONCLUSIVE: return "background:#f5f5f5; color:#595959; border:1px solid #d9d9d9;"
+            return "background:#f5f5f5; color:#595959; border:1px solid #d9d9d9;"
+
+        total_tests = sum(len(res.measurements) for res in self.channel_results.values())
+        minutes = int(self.elapsed_seconds // 60)
+        seconds = int(self.elapsed_seconds % 60)
+        enh_ok = self.fxsound_disabled and self.enhancements_disabled
+        enh_label = "Clean — Enhancements Disabled" if enh_ok else "Active / Potentially Altered"
+        enh_dot = "#52c41a" if enh_ok else "#faad14"
+        enh_bg = "#f6ffed" if enh_ok else "#fffbe6"
+        enh_bd = "#b7eb8f" if enh_ok else "#ffe58f"
+        mode_label = self.mode.title() + " Test"
+        # Build channel HTML
+        channels_html = ""
+        for ch, res in self.channel_results.items():
+            if ch == "sweep":
+                header_accent = "#722ed1"
+                ch_title = "Sweep Marker Retests"
+                ch_icon = "S"
+            elif ch == "left":
+                header_accent = "#d51535"
+                ch_title = "Left Speaker"
+                ch_icon = "L"
+            elif ch == "right":
+                header_accent = "#1ac1ff"
+                ch_title = "Right Speaker"
+                ch_icon = "R"
+            else:
+                header_accent = "#595959"
+                ch_title = _esc(ch.title())
+                ch_icon = "•"
+            avg = f"{res.avg_clarity:.1f} / 10"
+            anchor = f"{res.rating_anchor:.1f} / 10"
+            # status badge
+            if res.is_global_problem:
+                if res.global_problem_type == "RATING_SCALE_LOW":
+                    status_html = '<span class="badge warn">Low Rating Scale</span><p class="callout warn">All tones audible but rated low — volume too low or conservative rating. Not a hardware failure. Increase volume and replay 1 kHz calibration.</p>'
+                elif res.global_problem_type == "GLOBAL_OUTPUT_UNCERTAIN":
+                    status_html = '<span class="badge warn">Uncertain Output</span><p class="callout warn">Partial audibility 25–75% with low quality. Check volume, room noise, or test with headphones.</p>'
+                else:
+                    status_html = '<span class="badge danger">Output Failure</span><p class="callout danger">Mid/high frequencies inaudible &lt;25% heard. Check mute, device, driver or heavy filter.</p>'
+                regions_block = ""
+            else:
+                if res.is_control_unstable:
+                    status_html = '<span class="badge warn">Control Drift</span><p class="hint">1 kHz control tones varied — possible fatigue or volume shift. Confidence slightly reduced.</p>'
+                elif not res.regions:
+                    status_html = '<span class="badge ok">Clean</span><p class="hint">No significant anomalies. Playback is uniform across the tested spectrum.</p>'
+                    regions_block = ""
+                else:
+                    status_html = f'<span class="badge danger">{len(res.regions)} anomaly{"s" if len(res.regions)!=1 else ""} detected</span>'
+                    regions_block = ""
+                if not res.is_global_problem and ch != "sweep":
+                    if not res.regions:
+                        regions_block = '<div class="empty">No anomalies — response is flat.</div>'
+                    else:
+                        for reg in res.regions:
+                            start_disp = practical_round_freq(reg.start_estimate)
+                            end_disp = practical_round_freq(reg.end_estimate)
+                            worst_disp = practical_round_freq(reg.worst_frequency if reg.worst_frequency > 0 else reg.center_frequency)
+                            unc = f'{reg.uncertainty_pct:.0f}%' if reg.uncertainty_pct else '3%'
+                            if reg.is_point_anomaly or reg.f_low == reg.f_high or start_disp >= end_disp:
+                                range_str = f'~{worst_disp:.0f} Hz <span class="sub">Narrow point anomaly</span>'
+                                bracket_note = f'Bracket ±{unc}'
+                            elif reg.lower_boundary_open:
+                                range_str = f'&lt; {end_disp:.0f} Hz <span class="sub">extends below range</span>'
+                                bracket_note = 'Lower open'
+                            elif reg.upper_boundary_open:
+                                range_str = f'&gt; {start_disp:.0f} Hz <span class="sub">extends above range</span>'
+                                bracket_note = 'Upper open'
+                            else:
+                                range_str = f'{start_disp:.0f} – {end_disp:.0f} Hz'
+                                bracket_note = f'±{unc} bracket'
+                            sev_c = _sev_color(reg.severity)
+                            cat_style = _cat_style(reg.category)
+                            anom_w = max(4, min(100, reg.anomaly_confidence))
+                            hard_w = max(4, min(100, reg.hardware_confidence))
+                            regions_block += f'''
+                            <div class="region">
+                              <div class="region-head">
+                                <div class="range">{range_str} <span class="bracket">{_esc(bracket_note)}</span></div>
+                                <span class="severity" style="background:{sev_c}; color:#fff;">{_esc(reg.severity)}</span>
+                              </div>
+                              <div class="region-grid">
+                                <div><span class="k">Worst point</span><span class="v">~{worst_disp:.0f} Hz · {reg.min_quality:.1f}/10</span></div>
+                                <div><span class="k">Average in dip</span><span class="v">{reg.avg_quality:.1f}/10</span></div>
+                                <div><span class="k">Local baseline</span><span class="v">{reg.baseline_quality:.1f}/10 <span class="depth">depth {reg.depth:.1f}</span></span></div>
+                                <div><span class="k">Points</span><span class="v">{len(reg.points)} measured</span></div>
+                              </div>
+                              <div class="bars">
+                                <div class="bar-row"><span class="bar-label">Anomaly</span><div class="bar-track"><div class="bar-fill" style="width:{anom_w}%; background:{sev_c};"></div></div><span class="bar-val">{reg.anomaly_confidence}%</span></div>
+                                <div class="bar-row"><span class="bar-label">Hardware</span><div class="bar-track"><div class="bar-fill" style="width:{hard_w}%; background:#595959;"></div></div><span class="bar-val">{reg.hardware_confidence}%</span></div>
+                              </div>
+                              <div class="cat" style="{cat_style} padding:4px 10px; border-radius:999px; display:inline-block; font-size:11px; font-weight:700;">{_esc(_cat_label(reg.category))}</div>
+                              <div class="evidence">{_esc(reg.evidence)}</div>
+                            </div>
+                            '''
+                if ch == "sweep":
+                    if not res.measurements:
+                        regions_block = '<div class="empty">No sweep markers retested.</div>'
+                    else:
+                        rows = "".join(f'<tr><td>~{practical_round_freq(m.frequency_hz):,.0f} Hz</td><td>{"audible" if m.heard else "<b>NOT audible</b>"}</td><td>{"%d/10"%m.clarity if m.heard else "—"}</td></tr>' for m in res.measurements)
+                        regions_block = f'<table class="sweep-table"><thead><tr><th>Frequency</th><th>Result</th><th>Clarity</th></tr></thead><tbody>{rows}</tbody></table><p class="hint">Markers are subjective impressions during fast sweep — rows above are calibrated retests.</p>'
+            channels_html += f'''
+            <section class="channel-card" style="border-top: 4px solid {header_accent};">
+              <div class="channel-head">
+                <div class="ch-badge" style="background:{header_accent};">{ch_icon}</div>
+                <div>
+                  <h3>{_esc(ch_title)}</h3>
+                  <p class="ch-meta">Avg clarity {avg} · Anchor {anchor}</p>
+                </div>
+                <div class="ch-status">{status_html}</div>
+              </div>
+              {regions_block}
+            </section>
+            '''
+
+        cc_html = ""
+        if self.cross_channel_findings:
+            cc_esc = _esc(self.cross_channel_findings).replace("\n", "<br>")
+            cc_html = f'<section class="cc-card"><h3>Cross-Channel Differential</h3><div class="cc-body">{cc_esc}</div></section>'
+
+        # guidance
+        guidance = [
+            "'Perceived Anomaly' reflects what was audible under current conditions.",
+            "Acoustic roll-off below 160–250 Hz is standard for small laptop drivers.",
+            "Inaudibility ≥10 kHz commonly reflects human hearing thresholds.",
+            "If both channels dip at the same frequency, DSP/EQ or room acoustics are more likely than twin hardware faults.",
+            "For single-channel dips, verify with headphones to rule out hearing asymmetry.",
+        ]
+        guidance_html = "".join(f'<li>{_esc(g)}</li>' for g in guidance)
+
+        return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>FreqChecker Report — {_esc(self.session_id)}</title>
+<style>
+  @page {{ margin: 16mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; padding:32px; font-family: 'Inter','Segoe UI',system-ui,-apple-system,sans-serif; background:#f5f5f7; color:#1f1f1f; line-height:1.5; -webkit-print-color-adjust: exact; }}
+  .shell {{ max-width: 960px; margin:0 auto; }}
+  .header {{ background: linear-gradient(135deg,#0f0f0f 0%, #1e1e1e 100%); color:#fff; border-radius:16px; padding:28px 32px; margin-bottom:20px; position:relative; overflow:hidden; }}
+  .header::after {{ content:""; position:absolute; top:-40px; right:-40px; width:220px; height:220px; background: radial-gradient(circle, rgba(213,21,53,0.18) 0%, transparent 70%); }}
+  .header h1 {{ margin:0; font-size:22px; letter-spacing:-0.3px; font-weight:800; }}
+  .header h1 span {{ color:#d51535; }}
+  .header p {{ margin:6px 0 0; color:#b1b1b1; font-size:13px; }}
+  .meta {{ position:absolute; top:22px; right:24px; text-align:right; font-size:12px; color:#b1b1b1; line-height:1.4; }}
+  .meta strong {{ color:#fff; font-weight:700; }}
+  .summary {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-bottom:20px; }}
+  .kpi {{ background:#fff; border:1px solid #e6e8eb; border-radius:12px; padding:14px 16px; }}
+  .kpi .k {{ font-size:11px; letter-spacing:0.6px; text-transform:uppercase; color:#7f7f7f; font-weight:700; }}
+  .kpi .v {{ font-size:14px; font-weight:700; margin-top:4px; color:#1f1f1f; }}
+  .kpi .v small {{ font-weight:500; color:#595959; }}
+  .kpi.enh {{ border-left: 4px solid {enh_dot}; background:{enh_bg}; }}
+  .channel-card {{ background:#fff; border:1px solid #e6e8eb; border-radius:14px; padding:20px 22px; margin-bottom:16px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }}
+  .channel-head {{ display:flex; align-items:center; gap:14px; margin-bottom:14px; }}
+  .ch-badge {{ width:32px; height:32px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:14px; flex-shrink:0; }}
+  .channel-head h3 {{ margin:0; font-size:15px; font-weight:800; }}
+  .ch-meta {{ margin:2px 0 0; font-size:12px; color:#595959; }}
+  .ch-status {{ margin-left:auto; text-align:right; }}
+  .badge {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:800; letter-spacing:0.4px; }}
+  .badge.ok {{ background:#f6ffed; color:#389e0d; border:1px solid #b7eb8f; }}
+  .badge.warn {{ background:#fffbe6; color:#ad6800; border:1px solid #ffe58f; }}
+  .badge.danger {{ background:#fff1f0; color:#a8071a; border:1px solid #ffccc7; }}
+  .callout {{ margin:8px 0 0; padding:8px 12px; border-radius:8px; font-size:12px; line-height:1.5; }}
+  .callout.warn {{ background:#fffbe6; border:1px solid #ffe58f; color:#613400; }}
+  .callout.danger {{ background:#fff1f0; border:1px solid #ffccc7; color:#5c0011; }}
+  .hint {{ font-size:12px; color:#7f7f7f; margin-top:6px; }}
+  .empty {{ background:#f5f5f7; border:1px dashed #d9d9d9; border-radius:10px; padding:16px; text-align:center; color:#595959; font-size:13px; }}
+  .region {{ border:1px solid #f0f0f0; border-radius:12px; padding:16px; margin-top:12px; background:#fcfcfc; }}
+  .region-head {{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+  .range {{ font-size:15px; font-weight:800; }}
+  .range .sub {{ font-weight:500; color:#595959; font-size:12px; margin-left:6px; }}
+  .bracket {{ font-size:11px; color:#7f7f7f; margin-left:8px; font-weight:600; }}
+  .severity {{ margin-left:auto; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:800; }}
+  .region-grid {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin:12px 0; }}
+  .region-grid div {{ background:#fff; border:1px solid #e8e8eb; border-radius:10px; padding:10px 12px; }}
+  .region-grid .k {{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:#7f7f7f; font-weight:700; }}
+  .region-grid .v {{ display:block; font-size:13px; font-weight:700; margin-top:2px; }}
+  .depth {{ font-weight:500; color:#595959; font-size:12px; }}
+  .bars {{ display:grid; gap:8px; margin:10px 0; }}
+  .bar-row {{ display:grid; grid-template-columns: 72px 1fr 44px; align-items:center; gap:10px; font-size:12px; }}
+  .bar-label {{ color:#595959; font-weight:600; font-size:11px; }}
+  .bar-track {{ height:8px; background:#f0f0f0; border-radius:999px; overflow:hidden; }}
+  .bar-fill {{ height:100%; border-radius:999px; }}
+  .bar-val {{ font-weight:700; text-align:right; }}
+  .cat {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; margin-top:6px; }}
+  .evidence {{ margin-top:8px; font-size:12px; color:#434343; background:#fff; border:1px solid #f0f0f0; border-radius:8px; padding:8px 10px; }}
+  .cc-card {{ background:#fff; border:1px solid #e6e8eb; border-left:4px solid #1ac1ff; border-radius:14px; padding:18px 22px; margin-bottom:16px; }}
+  .cc-card h3 {{ margin:0 0 8px; font-size:14px; font-weight:800; }}
+  .cc-body {{ font-size:13px; color:#434343; line-height:1.6; white-space:pre-wrap; }}
+  .guide {{ background:#fff; border:1px solid #e6e8eb; border-radius:14px; padding:20px 22px; }}
+  .guide h3 {{ margin:0 0 10px; font-size:14px; font-weight:800; }}
+  .guide ol {{ margin:0; padding-left:18px; font-size:13px; color:#434343; }}
+  .guide li {{ margin-bottom:6px; }}
+  .footer {{ text-align:center; font-size:11px; color:#8c8c8c; margin-top:18px; }}
+  .sweep-table {{ width:100%; border-collapse: collapse; margin-top:8px; font-size:13px; }}
+  .sweep-table th {{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:#7f7f7f; background:#f5f5f7; padding:8px 10px; }}
+  .sweep-table td {{ padding:8px 10px; border-bottom:1px solid #f0f0f0; }}
+  @media (max-width: 640px) {{
+    body {{ padding:16px; }}
+    .summary {{ grid-template-columns: repeat(2, 1fr); }}
+    .region-grid {{ grid-template-columns: repeat(2, 1fr); }}
+    .header {{ padding:20px; }}
+    .meta {{ position:static; text-align:left; margin-top:12px; }}
+  }}
+  @media print {{
+    body {{ background:#fff; padding:0; }}
+    .shell {{ max-width: none; }}
+    .header {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="header">
+    <h1>FREQ<span>CHECKER</span> — Diagnostic Report</h1>
+    <p>Speaker Frequency Diagnostic Studio · FxSound-inspired premium report</p>
+    <div class="meta">
+      <div><strong>{_esc(self.session_id)}</strong> · Session</div>
+      <div>{_esc(self.created_at)}</div>
+      <div>{_esc(self.output_device_name)}</div>
+    </div>
+  </div>
+
+  <div class="summary">
+    <div class="kpi"><div class="k">Mode</div><div class="v">{_esc(mode_label)}</div></div>
+    <div class="kpi"><div class="k">Output Device</div><div class="v" style="font-size:13px;">{_esc(self.output_device_name)}</div></div>
+    <div class="kpi"><div class="k">Total Tests</div><div class="v">{total_tests} <small>tones</small></div></div>
+    <div class="kpi"><div class="k">Elapsed</div><div class="v">{minutes} min {seconds} s</div></div>
+  </div>
+  <div class="summary" style="grid-template-columns: 1fr;">
+    <div class="kpi enh" style="background:{enh_bg}; border-color:{enh_bd}; border-left-color:{enh_dot};">
+      <div class="k">Audio Enhancements</div><div class="v">{_esc(enh_label)}</div>
+    </div>
+  </div>
+
+  {channels_html}
+  {cc_html}
+
+  <section class="guide">
+    <h3>Diagnostic Guidance &amp; Interpretation</h3>
+    <ol>
+      {guidance_html}
+    </ol>
+  </section>
+
+  <div class="footer">Generated by FreqChecker · {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")} · Session {self.session_id} · This is a listening-based test, not a hardware failure proof.</div>
+</div>
+</body>
+</html>
+'''
 

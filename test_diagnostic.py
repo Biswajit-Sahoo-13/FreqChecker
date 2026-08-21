@@ -7,6 +7,8 @@ import unittest
 import numpy as np
 import math
 import random
+import time
+import threading
 
 from models import (
     Measurement, Region, ChannelResult, Session,
@@ -14,6 +16,7 @@ from models import (
 )
 from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler
 from audio_engine import AudioEngine
+import fx_theme
 
 
 class TestAudioGeneration(unittest.TestCase):
@@ -685,6 +688,242 @@ class TestSvgIcons(unittest.TestCase):
                                     is_emoji,
                                     f"Found emoji/symbol U+{ord(c):04X} in {file}:{line_idx} -> {line.strip()}"
                                 )
+
+
+    def test_fx_theme_tokens_and_qss(self):
+        import fx_theme
+        self.assertEqual(len(fx_theme.SPECTRUM_BANDS), 9)
+        for token in ["window_bg", "control_bg", "card_bg", "primary_accent", "text_primary", "text_body"]:
+            self.assertIn(token, fx_theme.FX_COLORS_DARK)
+            self.assertIn(token, fx_theme.FX_COLORS_LIGHT)
+            self.assertTrue(fx_theme.get_fx_color(token, True).startswith("#"))
+            self.assertTrue(fx_theme.get_fx_color(token, False).startswith("#"))
+        qss_dark = fx_theme.get_qss(True)
+        qss_light = fx_theme.get_qss(False)
+        self.assertIn("#181818", qss_dark)
+        self.assertIn("#f5f5f5", qss_light)
+        self.assertIn("#d51535", qss_dark)
+        self.assertIn("#1ac1ff", qss_light)
+
+    def test_visualizer_idle_timer_stops(self):
+        from ui_components import FxSpectrumVisualizerWidget
+        vis = FxSpectrumVisualizerWidget()
+        vis.set_provider(lambda: None)
+        vis._on_tick()
+        # When provider returns None, visualizer decays and stops timer
+        self.assertFalse(vis._timer.isActive())
+        self.assertFalse(vis._is_playing)
+
+
+class TestFxSoundUiAndNewFeatures(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            cls._app = QApplication([])
+        else:
+            cls._app = QApplication.instance()
+
+    def test_toggle_no_active_qss_present(self):
+        import fx_theme
+        for qss in (fx_theme.get_qss(True), fx_theme.get_qss(False)):
+            self.assertIn("QPushButton.toggle-no-active", qss)
+            self.assertIn("QPushButton.toggle-yes-active", qss)
+
+    def test_manrope_font_loads_and_rebuilds_qss(self):
+        import fx_theme
+        loaded = fx_theme.load_app_fonts()
+        self.assertTrue(loaded, "Bundled Manrope font failed to register")
+        self.assertIn("Manrope", fx_theme.FONT_FAMILY_STACK)
+        self.assertTrue(
+            fx_theme.FONT_FAMILY_STACK.startswith("'Manrope'"),
+            "Manrope must be the primary UI font family"
+        )
+        self.assertIn("'Manrope'", fx_theme.get_qss(True))
+        self.assertIn("'Manrope'", fx_theme.get_qss(False))
+
+    def test_scheduler_manual_queue_mode(self):
+        sched = TestScheduler(mode="quick")
+        sched.load_manual_queue([440.0, 880.0, 1660.0])
+        self.assertTrue(sched.manual_mode)
+        self.assertEqual(len(sched.test_queue), 3)
+        controller = DiagnosticController(mode="quick")
+        action, reason, count = sched.handle_phase_transition(controller)
+        self.assertEqual(action, "COMPLETE")
+        self.assertEqual(reason, "MANUAL_QUEUE_DONE")
+        self.assertEqual(count, 0)
+
+    def test_scheduler_undo_last_measurement(self):
+        sched = TestScheduler(mode="quick")
+        sched.start_channel("left")
+        controller = DiagnosticController(mode="quick")
+        first = sched.get_current_test()
+        m1 = Measurement(frequency_hz=first["freq"], channel="left", stage=first["stage"], heard=True, clarity=8)
+        sched.record_measurement(m1, controller)
+        second = sched.get_current_test()
+        m2 = Measurement(frequency_hz=second["freq"], channel="left", stage=second["stage"], heard=False, clarity=0)
+        sched.record_measurement(m2, controller)
+        self.assertEqual(len(sched.active_measurements), 2)
+        sched.undo_last_measurement()
+        self.assertEqual(len(sched.active_measurements), 1)
+        current = sched.get_current_test()
+        self.assertIsNotNone(current)
+        self.assertAlmostEqual(current["freq"], m2.frequency_hz, delta=1.0)
+        again = Measurement(frequency_hz=current["freq"], channel="left", stage=current["stage"], heard=True, clarity=9)
+        sched.record_measurement(again, controller)
+        self.assertEqual(len(sched.active_measurements), 2)
+
+    def test_session_sweep_marks_roundtrip(self):
+        session = Session(session_id="sweep_marks_test", mode="sweep")
+        session.sweep_marks_hz = [1234.5, 5678.0]
+        d = session.to_dict()
+        restored = Session.from_dict(d)
+        self.assertEqual(restored.sweep_marks_hz, [1234.5, 5678.0])
+
+    def test_from_dict_legacy_without_sweep_marks(self):
+        legacy = {"session_id": "legacy_1", "mode": "detailed"}
+        session = Session.from_dict(legacy)
+        self.assertEqual(session.sweep_marks_hz, [])
+
+    def test_real_spectrum_bands_from_engine(self):
+        engine = AudioEngine(sample_rate=48000, default_peak=0.4)
+        self.assertIsNone(engine.get_spectrum_bands())
+        tone = engine.generate_sine_tone(1000.0, duration_s=0.2, peak=0.4, channel="both")
+        engine._spectrum_meta = {"buffer": tone, "sample_rate": 48000}
+        # Simulate playback already 100 ms in so the analysis window holds real signal
+        engine._spectrum_start = time.time() - 0.1
+        engine._is_playing = True
+        try:
+            bands = engine.get_spectrum_bands()
+            self.assertIsNotNone(bands)
+            self.assertEqual(len(bands), len(fx_theme.SPECTRUM_BANDS))
+            peak_idx = max(range(len(bands)), key=lambda i: bands[i])
+            self.assertEqual(peak_idx, 4, "1 kHz tone must peak in the 1000 Hz band")
+            self.assertGreater(bands[peak_idx], 0.5)
+            for v in bands:
+                self.assertGreaterEqual(v, 0.0)
+                self.assertLessEqual(v, 1.0)
+        finally:
+            engine._is_playing = False
+            engine._spectrum_meta = None
+            engine._spectrum_start = None
+
+    def test_report_labels_sweep_retest_channel(self):
+        session = Session(session_id="sweep_report_test", mode="sweep")
+        m = Measurement(frequency_hz=2400.0, channel="both", stage=Stage.SWEEP, heard=True, clarity=7, is_retest=True)
+        session.channel_results["sweep"] = ChannelResult(channel="sweep", measurements=[m], avg_clarity=7.0)
+        report = session.generate_report()
+        self.assertIn("SWEEP MARKER RETESTS", report)
+        self.assertIn("2,400 Hz", report)
+
+
+class TestPlaybackLifecycleThreadSafety(unittest.TestCase):
+    """
+    Regression guard for native heap corruption (0xc0000374): python-sounddevice's
+    module-global stream must never receive concurrent play/stop calls.
+    All AudioEngine entry points serialize through _PORTAUDIO_LOCK.
+    """
+
+    class _FakeSd:
+        def __init__(self):
+            self.cur = 0
+            self.overlaps = []
+            self.calls = 0
+            self._mtx = threading.Lock()
+
+        def play(self, data, samplerate=48000, device=None, blocking=False):
+            with self._mtx:
+                self.cur += 1
+                self.calls += 1
+                if self.cur > 1:
+                    self.overlaps.append("play")
+            time.sleep(0.0005)
+            with self._mtx:
+                self.cur -= 1
+
+        def stop(self):
+            with self._mtx:
+                self.cur += 1
+                self.calls += 1
+                if self.cur > 1:
+                    self.overlaps.append("stop")
+            time.sleep(0.0005)
+            with self._mtx:
+                self.cur -= 1
+
+    def _make_engine(self, fake_sd):
+        import audio_engine as ae_mod
+        original = ae_mod.sd
+        ae_mod.sd = fake_sd
+        self.addCleanup(setattr, ae_mod, "sd", original)
+        return ae_mod.AudioEngine(sample_rate=48000)
+
+    def test_sequential_cycles_never_overlap_portaudio_calls(self):
+        import threading as threading_mod
+        fake = self._FakeSd()
+        eng = self._make_engine(fake)
+        tone = np.zeros((64, 2), dtype=np.float32)
+
+        for _ in range(20):
+            finished = []
+            eng.play_audio(tone, on_finished=lambda ok, err: finished.append(ok))
+            time.sleep(0.005)
+            eng.stop_playback()
+            t = eng._playback_thread
+            if t is not None:
+                t.join(timeout=2.0)
+            self.assertFalse(eng.is_playing())
+            self.assertEqual(finished, [], "explicit stop must suppress stale callbacks")
+
+        self.assertEqual(fake.overlaps, [])
+
+    def test_natural_completion_fires_callback_once(self):
+        fake = self._FakeSd()
+        eng = self._make_engine(fake)
+        tone = np.zeros((64, 2), dtype=np.float32)
+        finished = []
+        eng.play_audio(tone, on_finished=lambda ok, err: finished.append(ok))
+        t = eng._playback_thread
+        t.join(timeout=3.0)
+        self.assertEqual(len(finished), 1)
+        self.assertTrue(finished[0])
+        self.assertFalse(eng.is_playing())
+
+    def test_concurrent_play_stop_hammer_stays_consistent(self):
+        import threading as threading_mod
+        fake = self._FakeSd()
+        eng = self._make_engine(fake)
+        tone = np.zeros((64, 2), dtype=np.float32)
+        errors = []
+
+        def player():
+            try:
+                for _ in range(30):
+                    eng.play_audio(tone)
+                    time.sleep(0.002)
+            except Exception as e:
+                errors.append(e)
+
+        def stopper():
+            try:
+                for _ in range(30):
+                    eng.stop_playback()
+                    time.sleep(0.002)
+            except Exception as e:
+                errors.append(e)
+
+        tp = threading_mod.Thread(target=player)
+        ts = threading_mod.Thread(target=stopper)
+        tp.start(); ts.start()
+        tp.join(timeout=10); ts.join(timeout=10)
+        eng.stop_playback()
+        t = eng._playback_thread
+        if t is not None:
+            t.join(timeout=2.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(fake.overlaps, [])
+        self.assertFalse(eng.is_playing())
 
 
 if __name__ == "__main__":

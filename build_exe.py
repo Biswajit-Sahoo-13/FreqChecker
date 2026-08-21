@@ -55,11 +55,13 @@ def build():
         "--clean",
         "--noconfirm",
         "--collect-all=sounddevice",
+        "--add-data=" + os.path.join(base_dir, "fonts") + os.pathsep + "fonts",
         "--hidden-import=PySide6.QtCore",
         "--hidden-import=PySide6.QtGui",
         "--hidden-import=PySide6.QtWidgets",
         "--hidden-import=PySide6.QtSvg",
         "--hidden-import=icons",
+        "--hidden-import=fx_theme",
         "--hidden-import=numpy",
     ]
 

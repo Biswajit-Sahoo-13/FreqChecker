@@ -3,11 +3,30 @@ audio_engine.py - Low-latency programmatic audio generation and non-blocking pla
 """
 
 import re
+import math
 import threading
 import time
 from typing import List, Dict, Any, Optional, Callable
 import numpy as np
 import sounddevice as sd
+
+import fx_theme
+from fx_theme import SPECTRUM_BANDS
+
+# Geometric band edges used for spectrum binning (ISO centers from the theme).
+_LOW_EDGE = 20.0
+_HIGH_EDGE = 20000.0
+_BAND_EDGES = [_LOW_EDGE] + [
+    math.sqrt(SPECTRUM_BANDS[i] * SPECTRUM_BANDS[i + 1])
+    for i in range(len(SPECTRUM_BANDS) - 1)
+] + [_HIGH_EDGE]
+_FFT_WINDOW = 2048
+
+# Serializes EVERY python-sounddevice global-API call (sd.play / sd.stop / sd.rec).
+# PortAudio's module-global stream is NOT thread-safe: concurrent stop/play from
+# the GUI thread, playback worker threads, and preflight mic sampling corrupts
+# native memory (heap corruption 0xc0000374). All entry points must hold this.
+_PORTAUDIO_LOCK = threading.RLock()
 
 
 def _normalize_device_key(name: str) -> str:
@@ -43,6 +62,9 @@ class AudioEngine:
         self._is_playing = False
         self._generation = 0
         self._lock = threading.Lock()
+        # Spectrum context for the live visualizer (what is actually playing)
+        self._spectrum_meta: Optional[Dict[str, Any]] = None
+        self._spectrum_start: Optional[float] = None
 
     @staticmethod
     def get_output_devices() -> List[Dict[str, Any]]:
@@ -214,7 +236,8 @@ class AudioEngine:
                 mic_name = in_info.get("name", "Default Microphone")
                 in_sr = int(in_info.get("default_samplerate", 44100) or 44100)
                 if in_sr > 0:
-                    rec = sd.rec(int(0.25 * in_sr), samplerate=in_sr, channels=1, device=default_in, blocking=True)
+                    with _PORTAUDIO_LOCK:
+                        rec = sd.rec(int(0.25 * in_sr), samplerate=in_sr, channels=1, device=default_in, blocking=True)
                     rms = float(np.sqrt(np.mean(rec ** 2)))
                     ambient_dbfs = float(20.0 * np.log10(max(1e-7, rms)))
                     mic_available = True
@@ -271,9 +294,15 @@ class AudioEngine:
         """
         Load user music file (WAV, FLAC, OGG, MP3, etc.) using optional soundfile library.
         Returns float32 stereo array normalized to [-1.0, 1.0] and file's native sample rate.
+        Includes a 30-minute duration safety guard to protect low-RAM systems.
         """
         import soundfile as sf
-        data, sr = sf.read(path, dtype="float64", always_2d=True)
+        info = sf.info(path)
+        # 30 minutes limit at native sample rate to avoid memory exhaustion
+        if info.duration > 1800.0:
+            raise ValueError(f"Audio file duration ({info.duration / 60.0:.1f} min) exceeds maximum safe limit of 30 minutes.")
+
+        data, sr = sf.read(path, dtype="float32", always_2d=True)
         if data.shape[1] == 1:
             data = np.repeat(data, 2, axis=1)
         elif data.shape[1] > 2:
@@ -302,8 +331,12 @@ class AudioEngine:
         Slice and process music segment from start_sample with channel routing, volume scaling, and fade-in.
         """
         start = max(0, min(start_sample, len(base) - 1))
-        seg = base[start:].astype(np.float32, copy=True)
-        seg = self.route_stereo(seg, channel)
+        # Single copy slice
+        seg = np.array(base[start:], dtype=np.float32, copy=True)
+        if channel == "left":
+            seg[:, 1] = 0.0
+        elif channel == "right":
+            seg[:, 0] = 0.0
         vol = max(0.0, min(1.0, volume))
         seg *= vol
         n = int((fade_ms / 1000.0) * self.sample_rate)
@@ -406,43 +439,106 @@ class AudioEngine:
             return self._is_playing
 
     def stop_playback(self):
-        self._stop_event.set()
-        try:
-            sd.stop()
-        except Exception:
-            pass
         with self._lock:
+            self._generation += 1
             self._is_playing = False
+            self._spectrum_meta = None
+            self._spectrum_start = None
+        self._stop_event.set()
+        with _PORTAUDIO_LOCK:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+    def get_spectrum_bands(self) -> Optional[List[float]]:
+        """
+        Real 9-band energy snapshot of the audio currently being played.
+        Returns None when nothing is playing; otherwise a list of floats in
+        [0, 1] matching fx_theme.SPECTRUM_BANDS. Computed from a Hann-windowed
+        FFT of the most recent ~43 ms of the actual output buffer, so the
+        visualizer always reflects genuine signal content.
+        """
+        with self._lock:
+            if not self._is_playing or self._spectrum_meta is None or self._spectrum_start is None:
+                return None
+            meta = dict(self._spectrum_meta)
+            start = self._spectrum_start
+
+        buffer = meta.get("buffer")
+        if buffer is None or len(buffer) == 0:
+            return None
+
+        sr = float(meta.get("sample_rate", self.sample_rate))
+        elapsed = max(0.0, time.time() - start)
+        pos = int(elapsed * sr)
+
+        mono = buffer[:, 0] if buffer.ndim == 2 else buffer
+        end = min(len(mono), pos)
+        begin = max(0, end - _FFT_WINDOW)
+        window = mono[begin:end].astype(np.float64)
+        if len(window) < 64:
+            return [0.0] * len(SPECTRUM_BANDS)
+
+        window = window * np.hanning(len(window))
+        spec = np.abs(np.fft.rfft(window))
+        freqs = np.fft.rfftfreq(len(window), d=1.0 / sr)
+
+        total = float(np.sum(spec)) + 1e-9
+        band_vals = []
+        for i in range(len(SPECTRUM_BANDS)):
+            lo, hi = _BAND_EDGES[i], _BAND_EDGES[i + 1]
+            mask = (freqs >= lo) & (freqs < hi)
+            energy = float(np.sum(spec[mask])) if np.any(mask) else 0.0
+            band_vals.append(energy / total)
+
+        # Shape normalization: loudest band maps near full scale, scaled by
+        # overall activity so quiet passages visually shrink.
+        peak = max(band_vals) if band_vals else 0.0
+        if peak <= 1e-9:
+            return [0.0] * len(SPECTRUM_BANDS)
+        shape = [v / peak for v in band_vals]
+        rms = float(np.sqrt(np.mean(window ** 2))) + 1e-9
+        activity = min(1.0, rms * 6.0)
+        return [min(1.0, s * activity * 0.92) for s in shape]
 
     def play_audio(
         self,
         audio_data: np.ndarray,
         on_started: Optional[Callable[[], None]] = None,
         on_finished: Optional[Callable[[bool, Optional[str]], None]] = None,
-        block: bool = False
+        block: bool = False,
+        spectrum_meta: Optional[Dict[str, Any]] = None
     ):
-        self._stop_event.set()
-        try:
-            sd.stop()
-        except Exception:
-            pass
-
-        old_thread = self._playback_thread
-        if old_thread is not None and old_thread.is_alive():
-            old_thread.join(timeout=0.3)
-
-        self._stop_event.clear()
-
         with self._lock:
             self._generation += 1
             gen = self._generation
+            self._spectrum_meta = (
+                dict(spectrum_meta) if spectrum_meta is not None else None
+            )
+            self._spectrum_start = None
+
+        self._stop_event.set()
+        with _PORTAUDIO_LOCK:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+        old_thread = self._playback_thread
+        if old_thread is not None and old_thread.is_alive():
+            old_thread.join(timeout=0.5)
+
+        self._stop_event.clear()
 
         def _worker():
             with self._lock:
-                if gen == self._generation:
+                owns = (gen == self._generation)
+                if owns:
                     self._is_playing = True
+                    self._spectrum_start = time.time()
 
-            if on_started and gen == self._generation:
+            if on_started and owns:
                 try:
                     on_started()
                 except Exception:
@@ -454,20 +550,28 @@ class AudioEngine:
             try:
                 dev = self.current_device_index
                 sr = self._get_device_samplerate()
-                sd.play(audio_data, samplerate=sr, device=dev, blocking=False)
-
                 total_duration = len(audio_data) / float(self.sample_rate)
-                start_time = time.time()
+                start_time = None
+                with _PORTAUDIO_LOCK:
+                    if gen == self._generation and not self._stop_event.is_set():
+                        sd.play(audio_data, samplerate=sr, device=dev, blocking=False)
+                        start_time = time.time()
 
-                while not self._stop_event.wait(timeout=0.05) and gen == self._generation:
+                if start_time is None:
+                    return
+
+                while not self._stop_event.wait(timeout=0.05):
+                    if gen != self._generation:
+                        return
                     if (time.time() - start_time) >= total_duration + 0.05:
                         break
 
                 if self._stop_event.is_set() and gen == self._generation:
-                    try:
-                        sd.stop()
-                    except Exception:
-                        pass
+                    with _PORTAUDIO_LOCK:
+                        try:
+                            sd.stop()
+                        except Exception:
+                            pass
             except Exception as e:
                 success = False
                 error_msg = str(e)
@@ -475,6 +579,7 @@ class AudioEngine:
                 with self._lock:
                     if gen == self._generation:
                         self._is_playing = False
+                        self._spectrum_start = None
 
                 if on_finished and gen == self._generation:
                     try:

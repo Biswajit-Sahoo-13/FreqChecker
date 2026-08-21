@@ -18,7 +18,11 @@ class DiagnosticConfig:
     LOW_ROLLOFF_LIMIT = 250.0  # Structural roll-off zone limit for small laptop speakers
     CONTROL_VARIATION_LIMIT = 3.0
 
-    QUICK_GRID = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+    # Quick: start at 250 Hz — 125 Hz is below the roll-off threshold for most
+    # small laptop speakers and is marked EXPECTED_LOW_ROLLOFF; starting at
+    # 250 avoids an inaudible first tone that users mistake for hardware failure.
+    # Users who need sub-bass can use Detailed (63-16k) or set --quick-start-hz.
+    QUICK_GRID = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
     
     DETAILED_GRID = [
         63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0,
@@ -312,7 +316,7 @@ class DiagnosticController:
         freq_map: Dict[float, Measurement] = {}
         for m in chan_measurements:
             f = round(m.frequency_hz, 1)
-            if f not in freq_map or m.is_retest or m.stage in (Stage.REFINE, Stage.REGION_VERIFY):
+            if f not in freq_map or m.is_retest or m.stage == Stage.REFINE:
                 freq_map[f] = m
 
         valid_points = sorted(freq_map.values(), key=lambda x: x.frequency_hz)
@@ -739,6 +743,38 @@ class TestScheduler:
         self.edge_attempts: Dict[Tuple, int] = {}
         self.global_refine_count: int = 0
         self.active_measurements: List[Measurement] = []
+        self.manual_mode: bool = False
+
+    def load_manual_queue(self, freqs: List[float], stage: str = Stage.SWEEP):
+        """
+        Replace the queue with a fixed, user-driven sequence (e.g. sweep marker
+        retests). Manual mode skips all adaptive phase transitions.
+        """
+        self.start_channel(self.channel)
+        self.test_queue.clear()
+        self.current_idx = 0
+        self.pending_freqs.clear()
+        self.manual_mode = True
+        for f in freqs:
+            key = round(float(f), 1)
+            self.pending_freqs.add(key)
+            self.test_queue.append({
+                "freq": key,
+                "stage": stage,
+                "is_retest": True,
+                "is_control": False
+            })
+
+    def undo_last_measurement(self):
+        """
+        Step back one rating: drop the newest measurement and rewind the queue
+        cursor so the same test item is presented again.
+        """
+        if not self.active_measurements or self.current_idx <= 0:
+            return
+        m = self.active_measurements.pop()
+        self.pending_freqs.add(round(float(m.frequency_hz), 1))
+        self.current_idx -= 1
 
     def start_channel(self, channel: str):
         """
@@ -813,6 +849,9 @@ class TestScheduler:
         Returns (action, reason_or_status, count_of_new_items).
         action in ("ABORT", "CONTINUE", "COMPLETE").
         """
+        if self.manual_mode:
+            return "COMPLETE", "MANUAL_QUEUE_DONE", 0
+
         is_abort, abort_reason = controller.check_global_abort(self.active_measurements)
         if is_abort:
             return "ABORT", abort_reason, 0
