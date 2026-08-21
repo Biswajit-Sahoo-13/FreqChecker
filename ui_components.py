@@ -81,11 +81,11 @@ class FxSpectrumVisualizerWidget(QWidget):
         return max(12, int(usable / VIS_BAR_PITCH) // self._n_bands) * self._n_bands
 
     def start_if_playing(self):
-        if self._provider is not None and self._provider() is not None:
-            self._is_playing = True
-            self._decay_frames_left = 0
-            if not self._timer.isActive():
-                self._timer.start()
+        # FIX: start unconditionally when audio is known to be playing — previous check raced with _is_playing flag and left 75% of widget blank
+        self._is_playing = True
+        self._decay_frames_left = 12
+        if not self._timer.isActive():
+            self._timer.start()
 
     def stop_and_clear(self):
         self._timer.stop()
@@ -162,17 +162,14 @@ class FxSpectrumVisualizerWidget(QWidget):
         grad.setColorAt(0.5, _color(p["vis_low"], alpha))
         grad.setColorAt(1.0, high_top)
 
-        slots = len(self._history) // self._n_bands
-        total_bars = slots * self._n_bands
-        block_w = total_bars * VIS_BAR_PITCH
-        start_x = max(8.0, (w - block_w) / 2.0)
-
-        # enhanced: slightly wider bars for prominence + cap highlight
-        bar_w = VIS_BAR_WIDTH * 1.25  # 5.0 instead of 4 for more presence
-        pitch = VIS_BAR_PITCH * 1.05  # ~9.55
-        # recompute centered start with new pitch
+        total_bars = len(self._history)
+        # --- FIX: always fill full width (was 25% on narrow containers) ---
+        available = max(80.0, w - 16.0)
+        pitch = available / max(1, total_bars)
+        # keep bar visible but not overlapping
+        bar_w = max(2.4, min(6.0, pitch * 0.58))
         block_w = total_bars * pitch
-        start_x = max(8.0, (w - block_w) / 2.0)
+        start_x = (w - block_w) / 2.0
         painter.setBrush(QBrush(grad))
         # subtle outer glow when playing
         if self._is_playing:

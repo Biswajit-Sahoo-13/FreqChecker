@@ -155,12 +155,12 @@ def painter_palette() -> Dict[str, Any]:
 def build_qss(c: Dict[str, str]) -> str:
     """Generate complete unified QSS stylesheet from token dictionary."""
     return f"""
-/* ── Global Reset & Base Typography ── */
+/* ── Global Reset & Base Typography — bumped for 1080p fullscreen comfort ── */
 QWidget {{
     background-color: {c["window_bg"]};
     color: {c["text_body"]};
     font-family: {FONT_FAMILY_STACK};
-    font-size: 13px;
+    font-size: 14.5px;
 }}
 
 QMainWindow {{
@@ -187,38 +187,38 @@ QLabel {{
 }}
 
 QLabel.brand-title {{
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 800;
     color: {c["text_primary"]};
     letter-spacing: 1.5px;
 }}
 
 QLabel.title {{
-    font-size: 17px;
+    font-size: 19px;
     font-weight: 700;
     color: {c["text_primary"]};
 }}
 
 QLabel.section-title {{
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 700;
     color: {c["text_primary"]};
     letter-spacing: 0.5px;
 }}
 
 QLabel.subtitle {{
-    font-size: 12px;
+    font-size: 13.5px;
     color: {c["text_body"]};
-    line-height: 1.4;
+    line-height: 1.45;
 }}
 
 QLabel.hint {{
-    font-size: 11px;
+    font-size: 12.5px;
     color: {c["text_muted"]};
 }}
 
 QLabel.freq-display {{
-    font-size: 38px;
+    font-size: 42px;
     font-weight: 800;
     color: {c["primary_accent"]};
     letter-spacing: -0.5px;
@@ -260,9 +260,9 @@ QPushButton {{
     color: #ffffff;
     border: none;
     border-radius: 8px;
-    padding: 8px 18px;
+    padding: 9px 20px;
     font-weight: 700;
-    font-size: 13px;
+    font-size: 14.5px;
 }}
 
 QPushButton:hover {{
@@ -285,8 +285,9 @@ QPushButton.secondary {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 8px;
-    padding: 7px 14px;
+    padding: 8px 16px;
     font-weight: 600;
+    font-size: 14px;
 }}
 
 QPushButton.secondary:hover {{
@@ -411,9 +412,9 @@ QComboBox {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 10px;
-    padding: 9px 14px;
-    min-height: 20px;
-    font-size: 13px;
+    padding: 10px 16px;
+    min-height: 22px;
+    font-size: 14px;
     font-weight: 600;
 }}
 
@@ -444,8 +445,8 @@ QSpinBox, QDoubleSpinBox {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 8px;
-    padding: 6px 10px;
-    font-size: 13px;
+    padding: 7px 12px;
+    font-size: 14px;
     font-weight: 600;
 }}
 
@@ -456,7 +457,7 @@ QSpinBox:hover, QDoubleSpinBox:hover {{
 /* ── CheckBoxes ── */
 QCheckBox {{
     color: {c["text_body"]};
-    font-size: 13px;
+    font-size: 14px;
     spacing: 8px;
     background: transparent;
 }}
