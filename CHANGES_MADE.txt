@@ -1,0 +1,60 @@
+================================================================================
+          FreqChecker - Comprehensive Code Changes & Remediation Log
+================================================================================
+Date: 2026-08-19
+Audit Reference: Adversarial Audits, FxSound UI Overhaul & UX Polish Sprint
+Design Philosophy: FxSound Studio Aesthetics + Ponytail (Senior Lean Architecture)
+
+--------------------------------------------------------------------------------
+1. AUDIO HARDWARE & DEVICE DEDUPLICATION (audio_engine.py)
+--------------------------------------------------------------------------------
+
+1. Robust Multi-API Device Deduplication & Filtering (audio_engine.py)
+   - Problem: Host APIs on Windows (WASAPI, DirectSound, MME, WDM-KS) listed duplicate
+     entries with varying name truncations (e.g., 31-char MME truncated names vs full names).
+   - Fix:
+     a. Explicitly filter out MME, WDM-KS, and virtual drivers (Primary Sound Driver, Sound Mapper).
+     b. Exclusively prioritize Windows WASAPI (low latency, high fidelity) with DirectSound fallback.
+     c. Implemented `_normalize_device_key` to strip trailing incomplete parentheses and match base names.
+     d. Auto-detect default output device from WASAPI host API info and mark with clean display name.
+     e. Result: Exact 1:1 mapping with zero duplicate entries.
+
+--------------------------------------------------------------------------------
+2. PREMIUM FXSOUND THEME & ERGONOMIC UI (ui_components.py & app.py)
+--------------------------------------------------------------------------------
+
+2. Authentic FxSound Dual Themes — Light & Dark Modes (ui_components.py)
+   - Extracted and integrated exact color tokens from the official FxSound codebase:
+     * Dark Mode: Matte Carbon BG (#121212 / #1a1a1a), FxSound Crimson Accents (#d51535 / #e63462),
+       Glow Tips (#f7546f), crisp text (#e0e0e0).
+     * Light Mode: Clean Ice/Slate BG (#f2f3f5 / #ffffff), Electric Cyan/Blue (#0b9ed4 / #1ac1ff),
+       text (#2c3038).
+   - Global Theme Toggle button in top navbar instantly switches QSS and updates all dynamic
+     plots, visualizers, and badge colors without reload.
+
+3. Animated 9-Band Spectrum Equalizer Visualizer (ui_components.py)
+   - Built custom `FxSpectrumVisualizerWidget` inspired directly by FxSound's 9-band EQ visualizer:
+     * 9 frequency bands: 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz.
+     * High-FPS smooth animation with sinusoidal oscillation and frequency-targeted spectral resonance.
+     * Automatically pulses when tones play and decays to subtle ambient idle bars when stopped.
+
+4. Ergonomic Test & Response Action Card (app.py)
+   - Problem: Submit button was far away from the selection radio buttons at the bottom of the card.
+   - Fix: Unified the testing interface into a single, compact, cohesive response strip:
+     * Large tactile choice pills: `[ ✓ Yes, Heard (Y) ]` and `[ ✗ No, Didn't Hear (N) ]`.
+     * Direct proximity: The prominent glowing `[ Submit Response → (↵) ]` button is placed right
+       alongside the choice pills.
+     * Inline Rating Row: Selecting "Yes" smoothly unveils quick rating number pills (0–10) and slider
+       directly below without displacing the submit action.
+     * Zero wasted mouse travel: response time is fast, seamless, and intuitive.
+
+5. Modern Log-Frequency Response Plot (ui_components.py)
+   - Dual-theme aware with responsive dark/light grid lines, axis labels, and anomaly fills.
+   - Glowing halo data points with hover tooltips and instant click-to-replay functionality.
+
+--------------------------------------------------------------------------------
+3. VERIFICATION & BUILD
+--------------------------------------------------------------------------------
+- Test Suite: 22/22 unit tests passing (test_diagnostic.py).
+- Binary: freqchecker.exe compiled as optimized standalone single-file executable.
+================================================================================

@@ -1,0 +1,18 @@
+# FreqChecker: Design Review & Operational Questions
+# Created: 2026-08-19
+
+1. Executable Name & Location:
+   - Application named `FreqChecker` (`freqchecker.exe`).
+   - Bundled completely into the standalone folder `freqchecker/`.
+
+2. Default Tone Duration:
+   - Default is set to 2.0 seconds with 50ms raised-cosine fade ramps to prevent listener fatigue (reducing test time from ~15min down to ~5-8min), with user-configurable duration in settings and an instant 'R' replay hotkey.
+
+3. Low-Frequency Roll-Off Baseline:
+   - Weakness <= 160 Hz that recovers by 200-250 Hz is recognized as standard laptop physical driver acoustic limitation rather than hardware failure.
+
+4. False-Abort Protection:
+   - Global abort check excludes sub-200 Hz roll-off frequencies to ensure healthy laptop speakers with normal bass roll-off are never falsely aborted as defective.
+
+5. Sequential Cross-Channel Testing:
+   - Testing Left speaker followed by Right speaker allows full differential analysis to isolate one-sided driver problems from symmetrical DSP/room anomalies.
