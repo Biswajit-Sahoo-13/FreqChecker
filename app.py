@@ -12,6 +12,7 @@ import math
 import faulthandler
 import traceback
 import datetime
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 
 from PySide6.QtWidgets import (
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
     QSplitter, QSpinBox, QDoubleSpinBox, QSizePolicy, QScrollArea
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QSize, QPoint
-from PySide6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QPainterPath
+from PySide6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QPainterPath, QIcon
 
 from models import (
     Measurement, Region, ChannelResult, Session,
@@ -198,7 +199,16 @@ class FxTitleBar(QWidget):
         self.setStyleSheet(f"background-color: {bg}; border: none; border-top-left-radius: {r}px; border-top-right-radius: {r}px;")
         self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 800; letter-spacing: 1.2px; color: {tc}; background: transparent; border: none;")
         self.lbl_sub.setStyleSheet(f"font-size: 9px; font-weight: 600; color: {sc}; background: transparent; border: none; letter-spacing: 0.8px;")
-        self.lbl_icon.setPixmap(get_svg_pixmap("logo-bars", color=ac, size=QSize(18, 18)))
+        # premium mark — load from assets/icon.svg if present, else fallback to vector bars
+        try:
+            _p = Path(__file__).parent / "assets" / "icon.svg"
+            if _p.exists():
+                _ic = QIcon(str(_p))
+                self.lbl_icon.setPixmap(_ic.pixmap(QSize(18, 18)))
+            else:
+                self.lbl_icon.setPixmap(get_svg_pixmap("logo-bars", color=ac, size=QSize(18, 18)))
+        except Exception:
+            self.lbl_icon.setPixmap(get_svg_pixmap("logo-bars", color=ac, size=QSize(18, 18)))
         self.btn_back.setIcon(get_svg_icon("arrow-left", color=icon_c))
         self.btn_min.setIcon(get_svg_icon("minimize", color=icon_c))
         self.btn_max.setIcon(get_svg_icon("maximize", color=icon_c))
@@ -231,6 +241,17 @@ class FreqCheckerApp(QMainWindow):
     def __init__(self, frameless: bool = False):
         super().__init__()
         self.setWindowTitle("FreqChecker — Speaker Diagnostic Studio")
+        # Window icon — premium SVG mark (fallback to built-in if file missing)
+        try:
+            _base = Path(__file__).parent
+            _icon_p = _base / "assets" / "icon.svg"
+            if _icon_p.exists():
+                self.setWindowIcon(QIcon(str(_icon_p)))
+            else:
+                # fallback: use vector bars pixmap
+                self.setWindowIcon(get_svg_icon("logo-bars", color="#d51535"))
+        except Exception:
+            pass
         self.resize(1120, 740)
         self.setMinimumSize(960, 640)
         self.is_dark_theme: bool = True

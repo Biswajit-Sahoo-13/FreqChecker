@@ -1,0 +1,35 @@
+<!-- FreqChecker App Icon — 512×512, for Windows .ico / taskbar / installer -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="FreqChecker app icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e1e1e"/>
+      <stop offset="100%" stop-color="#0f0f0f"/>
+    </linearGradient>
+    <linearGradient id="crimson" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff4d4f"/>
+      <stop offset="100%" stop-color="#d51535"/>
+    </linearGradient>
+  </defs>
+  <!-- outer squircle -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bg)" stroke="#2b2b2b" stroke-width="6"/>
+  <!-- inner speaker card -->
+  <rect x="98" y="98" width="210" height="316" rx="32" fill="none" stroke="#d51535" stroke-width="14" stroke-linejoin="round"/>
+  <!-- driver -->
+  <circle cx="203" cy="256" r="78" fill="none" stroke="#3a3a3a" stroke-width="10"/>
+  <circle cx="203" cy="256" r="42" fill="url(#crimson)" />
+  <circle cx="203" cy="256" r="14" fill="#ffffff" opacity="0.97"/>
+  <!-- grille dots -->
+  <circle cx="150" cy="145" r="11" fill="#2b2b2b"/>
+  <circle cx="256" cy="145" r="11" fill="#2b2b2b"/>
+  <circle cx="150" cy="367" r="11" fill="#2b2b2b"/>
+  <circle cx="256" cy="367" r="11" fill="#2b2b2b"/>
+  <!-- frequency arcs -->
+  <path d="M 332 182 A 92 92 0 0 1 332 330" fill="none" stroke="#b1b1b1" stroke-width="16" stroke-linecap="round" opacity="0.95"/>
+  <path d="M 376 148 A 138 138 0 0 1 376 364" fill="none" stroke="#d51535" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 420 110 A 190 190 0 0 1 420 402" fill="none" stroke="#7f7f7f" stroke-width="14" stroke-linecap="round" opacity="0.5"/>
+  <!-- diagnostic badge -->
+  <g transform="translate(372 372)">
+    <circle cx="0" cy="0" r="72" fill="#d51535" stroke="#0f0f0f" stroke-width="14"/>
+    <path d="M -32 -2 L -8 22 L 36 -26" fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,0 +1,41 @@
+<!--
+  FreqChecker Icon — Original artwork
+  Premium diagnostic mark: speaker driver + radiating frequency arcs + check tick
+  Colors: FxSound crimson #d51535, muted #2b2b2b, pure geometry, no copied assets
+  ViewBox 0 0 32 32 — rounded 12px container friendly
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="FreqChecker icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e1e1e"/>
+      <stop offset="100%" stop-color="#0f0f0f"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff4d4f"/>
+      <stop offset="100%" stop-color="#d51535"/>
+    </linearGradient>
+  </defs>
+  <!-- container -->
+  <rect x="0.5" y="0.5" width="31" height="31" rx="8" fill="url(#bg)" stroke="#2b2b2b" stroke-width="1"/>
+  <!-- speaker body -->
+  <rect x="6.2" y="7" width="10.2" height="18" rx="2.2" fill="none" stroke="#d51535" stroke-width="1.6" stroke-linejoin="round"/>
+  <!-- driver outer -->
+  <circle cx="11.3" cy="16" r="5.2" fill="none" stroke="#3a3a3a" stroke-width="0.9"/>
+  <!-- driver inner + dot -->
+  <circle cx="11.3" cy="16" r="2.6" fill="#d51535" stroke="none"/>
+  <circle cx="11.3" cy="16" r="0.9" fill="#ffffff" opacity="0.95"/>
+  <!-- grille dots -->
+  <circle cx="9.2" cy="10.2" r="0.7" fill="#2b2b2b"/>
+  <circle cx="13.4" cy="10.2" r="0.7" fill="#2b2b2b"/>
+  <circle cx="9.2" cy="21.8" r="0.7" fill="#2b2b2b"/>
+  <circle cx="13.4" cy="21.8" r="0.7" fill="#2b2b2b"/>
+  <!-- radiating arcs — frequency -->
+  <path d="M 17.8 12.2 A 7 7 0 0 1 17.8 19.8" fill="none" stroke="#b1b1b1" stroke-width="1.25" stroke-linecap="round" opacity="0.95"/>
+  <path d="M 20.4 10.2 A 10 10 0 0 1 20.4 21.8" fill="none" stroke="#d51535" stroke-width="1.35" stroke-linecap="round" opacity="0.95"/>
+  <path d="M 23.0 8.0 A 13.5 13.5 0 0 1 23.0 24.0" fill="none" stroke="#7f7f7f" stroke-width="1.1" stroke-linecap="round" opacity="0.55"/>
+  <!-- diagnostic check — small badge -->
+  <g transform="translate(21.5 20.5)">
+    <circle cx="0" cy="0" r="5.2" fill="#d51535" stroke="#0f0f0f" stroke-width="1.2"/>
+    <path d="M -2.6 -0.1 L -0.7 1.8 L 2.8 -1.9" fill="none" stroke="#ffffff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -46,6 +46,15 @@ def build():
         "PySide6.QtWebChannel", "PySide6.QtWebSockets"
     ]
 
+    # Icon for exe (premium app-icon)
+    icon_path = os.path.join(base_dir, "assets", "app-icon.ico")
+    icon_arg = f"--icon={icon_path}" if os.path.exists(icon_path) else None
+    # Assets to bundle (logo, icon SVG/PNG, for window icon at runtime)
+    assets_src = os.path.join(base_dir, "assets")
+    assets_arg = f"--add-data={assets_src}{os.pathsep}assets" if os.path.isdir(assets_src) else None
+    fonts_src = os.path.join(base_dir, "fonts")
+    fonts_arg = f"--add-data={fonts_src}{os.pathsep}fonts" if os.path.isdir(fonts_src) else None
+
     cmd = [
         sys.executable,
         "-m", "PyInstaller",
@@ -55,7 +64,14 @@ def build():
         "--clean",
         "--noconfirm",
         "--collect-all=sounddevice",
-        "--add-data=" + os.path.join(base_dir, "fonts") + os.pathsep + "fonts",
+    ]
+    if fonts_arg:
+        cmd.append(fonts_arg)
+    if assets_arg:
+        cmd.append(assets_arg)
+    if icon_arg:
+        cmd.append(icon_arg)
+    cmd += [
         "--hidden-import=PySide6.QtCore",
         "--hidden-import=PySide6.QtGui",
         "--hidden-import=PySide6.QtWidgets",

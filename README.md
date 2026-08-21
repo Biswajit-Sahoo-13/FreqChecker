@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="420" alt="FreqChecker — Speaker Diagnostic Studio">
+</p>
+
 # FreqChecker — Adaptive Speaker Frequency Diagnostic Tool
 
 <p align="center">
@@ -7,6 +11,9 @@
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20WASAPI-0078D4">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
   <img alt="Build" src="https://img.shields.io/badge/build-passing-52c41a">
+</p>
+<p align="center">
+  <img src="assets/icon.svg" width="96" height="96" alt="FreqChecker icon mark">
 </p>
 
 > **FreqChecker** is an optimized, standalone Windows desktop application (`freqchecker.exe`) engineered to test the **entire speaker + playback-chain** frequency response adaptively. It identifies *perceptual* acoustic anomalies (what *you* hear under current conditions), verifies false-positives with **local geometric bisection**, and evaluates **cross-channel differentials** to separate DSP/room artifacts from true driver faults.
