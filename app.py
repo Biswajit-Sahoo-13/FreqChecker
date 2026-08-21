@@ -235,6 +235,8 @@ class FreqCheckerApp(QMainWindow):
         self.setMinimumSize(960, 640)
         self.is_dark_theme: bool = True
         self._frameless = frameless
+        self._nav_history: List[int] = []
+        self._current_page: int = PAGE_WIZARD
         if frameless:
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint | Qt.WindowSystemMenuHint)
             self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -477,10 +479,19 @@ class FreqCheckerApp(QMainWindow):
         n_layout.setContentsMargins(20, 12, 20, 12)
         n_layout.setSpacing(16)
         
+        # Back — always visible, goes to previous page or Home
+        self.btn_nav_back = QPushButton()
+        self.btn_nav_back.setIcon(get_svg_icon("arrow-left", color="#b1b1b1"))
+        self.btn_nav_back.setIconSize(QSize(16, 16))
+        self.btn_nav_back.setFixedSize(32, 32)
+        self.btn_nav_back.setToolTip("Back")
+        self.btn_nav_back.setStyleSheet("QPushButton { background: rgba(255,255,255,0.06); border: 1px solid #2b2b2b; border-radius: 8px; } QPushButton:hover { background: rgba(255,255,255,0.10); border-color:#3a3a3a; } QPushButton:disabled { opacity: 0.35; }")
+        self.btn_nav_back.clicked.connect(lambda: self._go_back())
+        n_layout.addWidget(self.btn_nav_back)
         # Brand / Logo — clickable to Homepage
         brand_frame = QFrame()
         brand_frame.setCursor(Qt.PointingHandCursor)
-        brand_frame.setToolTip("Go to Homepage")
+        brand_frame.setToolTip("Go to Homepage — click logo to return home")
         brand_frame.setStyleSheet("QFrame { background: transparent; border: none; border-radius: 8px; } QFrame:hover { background: rgba(255,255,255,0.06); }")
         brand_layout = QVBoxLayout(brand_frame)
         brand_layout.setContentsMargins(6, 4, 6, 4)
@@ -501,29 +512,38 @@ class FreqCheckerApp(QMainWindow):
         n_layout.addWidget(brand_frame)
         n_layout.addStretch()
         
-        # Top Center 9-Band Spectrum Visualizer Monitor Box
+        # Top Center 9-Band Spectrum Visualizer Monitor Box — more enhanced: taller, bordered, live LED
         vis_container = QFrame()
-        vis_container.setStyleSheet("background: transparent;")
+        vis_container.setProperty("class", "card")
+        vis_container.setStyleSheet("QFrame[class=\"card\"] { background-color: #0f0f0f; border: 1px solid #2b2b2b; border-radius: 10px; }")
         vis_layout = QVBoxLayout(vis_container)
-        vis_layout.setContentsMargins(0, 0, 0, 0)
-        vis_layout.setSpacing(2)
+        vis_layout.setContentsMargins(12, 8, 12, 10)
+        vis_layout.setSpacing(6)
         vis_layout.setAlignment(Qt.AlignCenter)
         
         vis_header = QHBoxLayout()
         vis_header.setSpacing(6)
         vis_header.setAlignment(Qt.AlignCenter)
+        self.lbl_vis_dot = QLabel()
+        self.lbl_vis_dot.setFixedSize(8, 8)
+        self.lbl_vis_dot.setStyleSheet("background-color: #3a3a3a; border-radius: 4px; border: none;")
+        self.lbl_vis_dot.setToolTip("Live — animates while audio is playing")
         lbl_vis_title = QLabel("LIVE 9-BAND SPECTRUM MONITOR")
         lbl_vis_title.setProperty("class", "section-title")
+        lbl_vis_title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 0.8px; color: #ffffff; background: transparent; border: none;")
         lbl_vis_desc = QLabel("(63 Hz – 16 kHz)")
         lbl_vis_desc.setProperty("class", "hint")
+        vis_header.addWidget(self.lbl_vis_dot)
         vis_header.addWidget(lbl_vis_title)
         vis_header.addWidget(lbl_vis_desc)
         vis_layout.addLayout(vis_header)
         
-        self.top_visualizer = FxSpectrumVisualizerWidget(height=46)
+        self.top_visualizer = FxSpectrumVisualizerWidget(height=68)
         self.top_visualizer.set_provider(self._get_spectrum_values)
+        # more FxSound-like: subtle inner glow via stylesheet on the custom widget is painted, so keep transparent wrapper
+        self.top_visualizer.setStyleSheet("background: transparent; border: none;")
         vis_layout.addWidget(self.top_visualizer)
-        n_layout.addWidget(vis_container)
+        n_layout.addWidget(vis_container, 1)
         n_layout.addStretch()
         
         # Theme Switcher Button with SVG Icon
@@ -601,12 +621,54 @@ class FreqCheckerApp(QMainWindow):
                 child.setIcon(get_svg_icon("arrow-left", color=accent))
 
     def _switch_page(self, index: int):
+        # track history for Back/Home
+        if hasattr(self, "_current_page") and self._current_page != index:
+            if not hasattr(self, "_nav_history"):
+                self._nav_history = []
+            self._nav_history.append(self._current_page)
+            if len(self._nav_history) > 20:
+                self._nav_history.pop(0)
+        self._current_page = index
         self.stack.setCurrentIndex(index)
+        self._update_back_buttons()
+
+    def _go_home(self):
+        try:
+            self.audio_engine.stop_playback()
+            self.top_visualizer.stop_and_clear()
+        except Exception:
+            pass
+        if hasattr(self, "_nav_history"):
+            self._nav_history.clear()
+        self._switch_page(PAGE_WIZARD)
+
+    def _go_back(self):
+        if hasattr(self, "_nav_history") and self._nav_history:
+            prev = self._nav_history.pop()
+            self._current_page = prev  # avoid double-push
+            self.stack.setCurrentIndex(prev)
+            self._update_back_buttons()
+        else:
+            self._go_home()
+
+    def _update_back_buttons(self):
+        has_back = bool(getattr(self, "_nav_history", [])) and getattr(self, "_current_page", PAGE_WIZARD) != PAGE_WIZARD
+        for attr in ("btn_nav_back",):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setEnabled(has_back)
+                btn.setToolTip("Back" if has_back else "Already on Home")
+        if hasattr(self, "_title_bar") and hasattr(self._title_bar, "btn_back"):
+            self._title_bar.btn_back.setEnabled(has_back)
+            self._title_bar.btn_back.setToolTip("Back" if has_back else "Already on Home")
 
     def _on_playback_started_ui(self, freq_hz: float = 1000.0):
         self._active_tone_freq = freq_hz
         self.btn_replay.setEnabled(False)
         self.top_visualizer.start_if_playing()
+        # enhance live dot
+        if hasattr(self, "lbl_vis_dot"):
+            self.lbl_vis_dot.setStyleSheet("color: #d51535; font-size: 10px; background: transparent; border: none;")
 
     def _on_playback_finished_ui(self, ok: bool, err_msg: str):
         self.btn_replay.setEnabled(True)
@@ -619,6 +681,9 @@ class FreqCheckerApp(QMainWindow):
             self.btn_cal_toggle.style().unpolish(self.btn_cal_toggle)
             self.btn_cal_toggle.style().polish(self.btn_cal_toggle)
             self.top_visualizer.stop_and_clear()
+        # reset live dot
+        if hasattr(self, "lbl_vis_dot"):
+            self.lbl_vis_dot.setStyleSheet("color: #3a3a3a; font-size: 10px; background: transparent; border: none;")
         self.last_playback_ok = ok
         if not ok and err_msg:
             self._show_playback_error(err_msg)
