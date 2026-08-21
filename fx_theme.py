@@ -155,12 +155,12 @@ def painter_palette() -> Dict[str, Any]:
 def build_qss(c: Dict[str, str]) -> str:
     """Generate complete unified QSS stylesheet from token dictionary."""
     return f"""
-/* ── Global Reset & Base Typography — bumped for 1080p fullscreen comfort ── */
+/* ── Global Reset & Base Typography — larger for 1080p/1440p fullscreen comfort ── */
 QWidget {{
     background-color: {c["window_bg"]};
     color: {c["text_body"]};
     font-family: {FONT_FAMILY_STACK};
-    font-size: 14.5px;
+    font-size: 15.5px;
 }}
 
 QMainWindow {{
@@ -187,41 +187,41 @@ QLabel {{
 }}
 
 QLabel.brand-title {{
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 800;
     color: {c["text_primary"]};
     letter-spacing: 1.5px;
 }}
 
 QLabel.title {{
-    font-size: 19px;
+    font-size: 21px;
     font-weight: 700;
     color: {c["text_primary"]};
 }}
 
 QLabel.section-title {{
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 700;
     color: {c["text_primary"]};
     letter-spacing: 0.5px;
 }}
 
 QLabel.subtitle {{
-    font-size: 13.5px;
+    font-size: 14.5px;
     color: {c["text_body"]};
-    line-height: 1.45;
+    line-height: 1.5;
 }}
 
 QLabel.hint {{
-    font-size: 12.5px;
+    font-size: 13px;
     color: {c["text_muted"]};
 }}
 
 QLabel.freq-display {{
-    font-size: 42px;
+    font-size: 46px;
     font-weight: 800;
     color: {c["primary_accent"]};
-    letter-spacing: -0.5px;
+    letter-spacing: -0.6px;
 }}
 
 /* ── Status Badges ── */
@@ -230,8 +230,8 @@ QLabel.badge-info {{
     color: {c["text_body"]};
     border: 1px solid {c["card_border"]};
     border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 11px;
+    padding: 5px 10px;
+    font-size: 12px;
 }}
 
 QLabel.badge-warning {{
@@ -239,8 +239,8 @@ QLabel.badge-warning {{
     color: {c["warning"]};
     border: 1px solid {c["warning"]};
     border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 11px;
+    padding: 5px 10px;
+    font-size: 12px;
     font-weight: 600;
 }}
 
@@ -249,8 +249,8 @@ QLabel.badge-success {{
     color: {c["success"]};
     border: 1px solid {c["success"]};
     border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 11px;
+    padding: 5px 10px;
+    font-size: 12px;
     font-weight: 600;
 }}
 
@@ -260,9 +260,9 @@ QPushButton {{
     color: #ffffff;
     border: none;
     border-radius: 8px;
-    padding: 9px 20px;
+    padding: 10px 22px;
     font-weight: 700;
-    font-size: 14.5px;
+    font-size: 15.5px;
 }}
 
 QPushButton:hover {{
@@ -285,9 +285,9 @@ QPushButton.secondary {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 8px;
-    padding: 8px 16px;
+    padding: 9px 18px;
     font-weight: 600;
-    font-size: 14px;
+    font-size: 15px;
 }}
 
 QPushButton.secondary:hover {{
@@ -412,9 +412,9 @@ QComboBox {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 10px;
-    padding: 10px 16px;
-    min-height: 22px;
-    font-size: 14px;
+    padding: 11px 18px;
+    min-height: 24px;
+    font-size: 15px;
     font-weight: 600;
 }}
 
@@ -445,8 +445,8 @@ QSpinBox, QDoubleSpinBox {{
     color: {c["text_primary"]};
     border: 1px solid {c["card_border"]};
     border-radius: 8px;
-    padding: 7px 12px;
-    font-size: 14px;
+    padding: 8px 14px;
+    font-size: 15px;
     font-weight: 600;
 }}
 
@@ -457,14 +457,14 @@ QSpinBox:hover, QDoubleSpinBox:hover {{
 /* ── CheckBoxes ── */
 QCheckBox {{
     color: {c["text_body"]};
-    font-size: 14px;
-    spacing: 8px;
+    font-size: 15px;
+    spacing: 9px;
     background: transparent;
 }}
 
 QCheckBox::indicator {{
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border-radius: 4px;
     border: 1.5px solid {c["card_border"]};
     background-color: {c["control_bg"]};
