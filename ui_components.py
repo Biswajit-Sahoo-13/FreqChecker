@@ -154,8 +154,8 @@ class FxSpectrumVisualizerWidget(QWidget):
         alpha = 1.0 if self._is_playing else 0.75
         high_top = _color(p["vis_high"], alpha)
         if not self._is_playing:
-            h, s, v, a = high_top.getHsvF()
-            high_top = QColor.fromHsvF(h, s * 0.35, v, a)
+            hh, ss, vv, aa = high_top.getHsvF()
+            high_top = QColor.fromHsvF(hh, ss * 0.35, vv, aa)
 
         grad = QLinearGradient(2.0, 0.0, 2.0, h)
         grad.setColorAt(0.0, high_top)
@@ -167,18 +167,44 @@ class FxSpectrumVisualizerWidget(QWidget):
         block_w = total_bars * VIS_BAR_PITCH
         start_x = max(8.0, (w - block_w) / 2.0)
 
+        # enhanced: slightly wider bars for prominence + cap highlight
+        bar_w = VIS_BAR_WIDTH * 1.25  # 5.0 instead of 4 for more presence
+        pitch = VIS_BAR_PITCH * 1.05  # ~9.55
+        # recompute centered start with new pitch
+        block_w = total_bars * pitch
+        start_x = max(8.0, (w - block_w) / 2.0)
         painter.setBrush(QBrush(grad))
+        # subtle outer glow when playing
+        if self._is_playing:
+            glow = QColor(p["vis_high"])
+            glow.setAlpha(28)
+            painter.setPen(QPen(glow, 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), VIS_PANEL_RADIUS, VIS_PANEL_RADIUS)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(grad))
         bars_path = QPainterPath()
         x = start_x
-        draw_h = h - 16.0
+        draw_h = h - 12.0  # taller bars (was -16)
         mid_y = h / 2.0
+        caps = []
         for v in self._history:
-            bh = max(1.2, v * draw_h)
-            bars_path.addRect(
-                QRectF(x, mid_y - bh / 2.0, VIS_BAR_WIDTH, bh)
-            )
-            x += VIS_BAR_PITCH
+            bh = max(2.0, v * draw_h)
+            rect = QRectF(x, mid_y - bh / 2.0, bar_w, bh)
+            bars_path.addRoundedRect(rect, 1.2, 1.2)
+            if self._is_playing and v > 0.62:
+                # peak cap: 2.5px bright tip
+                caps.append(QRectF(x, rect.top(), bar_w, 2.5))
+            x += pitch
         painter.drawPath(bars_path)
+        # draw bright caps
+        if caps:
+            cap_color = QColor("#ffffff")
+            cap_color.setAlpha(210 if dark else 190)
+            painter.setBrush(QBrush(cap_color))
+            painter.setPen(Qt.NoPen)
+            for cr in caps:
+                painter.drawRoundedRect(cr, 1.0, 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

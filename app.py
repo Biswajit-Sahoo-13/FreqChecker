@@ -638,9 +638,12 @@ class FreqCheckerApp(QMainWindow):
             self.top_visualizer.stop_and_clear()
         except Exception:
             pass
+        # avoid pushing history when going home
         if hasattr(self, "_nav_history"):
             self._nav_history.clear()
-        self._switch_page(PAGE_WIZARD)
+        self._current_page = PAGE_WIZARD
+        self.stack.setCurrentIndex(PAGE_WIZARD)
+        self._update_back_buttons()
 
     def _go_back(self):
         if hasattr(self, "_nav_history") and self._nav_history:
@@ -666,9 +669,9 @@ class FreqCheckerApp(QMainWindow):
         self._active_tone_freq = freq_hz
         self.btn_replay.setEnabled(False)
         self.top_visualizer.start_if_playing()
-        # enhance live dot
+        # enhance live dot — LED turns crimson when playing
         if hasattr(self, "lbl_vis_dot"):
-            self.lbl_vis_dot.setStyleSheet("color: #d51535; font-size: 10px; background: transparent; border: none;")
+            self.lbl_vis_dot.setStyleSheet("background-color: #d51535; border-radius: 4px; border: none;")
 
     def _on_playback_finished_ui(self, ok: bool, err_msg: str):
         self.btn_replay.setEnabled(True)
@@ -683,7 +686,7 @@ class FreqCheckerApp(QMainWindow):
             self.top_visualizer.stop_and_clear()
         # reset live dot
         if hasattr(self, "lbl_vis_dot"):
-            self.lbl_vis_dot.setStyleSheet("color: #3a3a3a; font-size: 10px; background: transparent; border: none;")
+            self.lbl_vis_dot.setStyleSheet("background-color: #3a3a3a; border-radius: 4px; border: none;")
         self.last_playback_ok = ok
         if not ok and err_msg:
             self._show_playback_error(err_msg)
