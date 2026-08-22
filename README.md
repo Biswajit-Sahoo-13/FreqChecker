@@ -101,7 +101,7 @@ FreqChecker/                          # ← https://github.com/Biswajit-Sahoo-13
     ├── fx_theme.py                    # FxSound Design Tokens (27), Dual-Theme QSS & Font Loader
     ├── icons.py                       # Vector SVG Icon Renderer (no platform emoji)
     ├── fonts/Manrope.ttf              # Bundled UI Typeface
-    ├── test_diagnostic.py             # Automated Unit Test Suite (50 tests, 500-iter fuzz + oracle)
+    ├── test_diagnostic.py             # Automated Unit Test Suite (60 tests, 500-iter fuzz + oracle)
     ├── build_exe.py                   # Optimized Selective PyInstaller Packaging Script
     ├── requirements.txt               # Dependency Manifest (compatible version ranges)
     ├── TECH_SPECS_AND_OPTIMIZATION.md # Comprehensive Algorithms & Performance Specs
@@ -179,6 +179,8 @@ freqchecker.exe --framed
 ---
 
 ## 🔍 Features
+
+- **Range Scan boundary finder (v1.5)** — pick any band `20 Hz – 20 kHz` (`From/To` on the Wizard); ~24 evenly spaced probes locate every heard→not-heard transition, then shrinking-step refinement (probes at `25/50/75%` of each bracket, closing at `≤10 Hz`) pins each silent zone to **±5 Hz** accuracy. Regions land in the report as `range scan: N probes, boundary ±X Hz` and flow into exports + cross-channel differential; a band-silent shortcut (< 20% heard) reports one whole-band region instead of probing pointlessly.
 
 - **Guided adaptive diagnostic** — 1/3-octave coarse grid (25 detailed: 63–16k / 6 quick: 250–8k, laptop-friendly), periodic `1 kHz` reference controls (every 8 detailed / 3 quick), isolated retests, bounded bisection to `±1/12` octave, `global_refine_count < 24`, and an **early dead-output abort** (6 unheard midrange tones ⇒ `GLOBAL_OUTPUT_FAILURE` without finishing the whole coarse pass).
 - **Quick vs Detailed** — Quick starts at **250 Hz** to skip inaudible sub-bass on small drivers; `Include sub-bass (63–200 Hz)` toggle restores `125 Hz` for headphones/large monitors. Detailed always full-range with roll-off-aware scoring.
@@ -280,6 +282,7 @@ flowchart LR
 
 ### 4) Other Modes
 
+- **Range Scan:** set `From/To Hz` (20–20 000) + channel on the Wizard, press `Start Range Scan`; rate each probe like the guided test (`Y/N`, `0–9`). Every detected drop-out is refined automatically until its boundary is pinned to ±5 Hz; results appear as precise ranges in the dashboard/report.
 - **Manual:** pick freq via spinbox or log slider `20·(1000)^(pos/1000)`, waveform, channel, duration, Play/Stop.
 - **Sweep:** set `10–60 s`, `Both/L/R`, `Start Sweep`, tap `Space` or `Mark Anomaly` with `35 ms` compensation, list appears on right, then `Retest Marked Frequencies` if offered.
 - **Music:** `Load Track` (`soundfile`), `Both/L/R` instant switch, volume `0–100%`, seek `0–1000` permille, `Play/Pause/Stop`.
@@ -326,13 +329,14 @@ A: Results → `Export Premium Report (.html)` → open in Edge/Chrome → `Ctrl
 | **2 — Stability** | `generation` thread guard, `QTimer` singleShot, partial-save, `faulthandler` | ✅ Done |
 | **3 — UX** | Frameless `38px` title (`— □ X`), logo `→ Home`, `Back` history, responsive `QScrollArea`, single `Play/Stop` toggle, `Z` undo | ✅ Done |
 | **4 — Performance** | `58.17 MB` `—onefile`, `960×640` min, `30 FPS` only while playing | ✅ Done |
-| **5 — Release** | `50` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
+| **5 — Release** | `60` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
 | **6 — Future** | Optional: mic-calibrated measurement, `OutputStream` gapless A/B, per-channel EQ overlay, `MuseScore` export | 🔜 Planned |
 
 ---
 
 ## 📝 Changelog
 
+- **2026-08-22 — v1.5** — New **Range Scan** mode: scan a user-selected band (20 Hz – 20 kHz), auto-refine every perceived drop-out boundary to ±5 Hz with bounded shrinking-step probing; results integrate into report/exports/cross-channel; band-silent shortcut; scan-personal anchor; 60 tests. Design spec: `docs/superpowers/specs/2026-08-22-range-scan-design.md`.
 - **2026-08-22 — v1.3** — Audit hardening: `Z`-undo now reverts retest resolutions (no silent data whitewash), anchor-relative `RATING_SCALE_LOW` (consistent conservative raters no longer falsely aborted), mid-coarse early dead-output abort, music mode RAM bounds (10-min cap + 5-min windows + single resident copy), Back button stops playback, blind mode hides the live plot, crash log + partial saves relocated to `%APPDATA%\FreqChecker` with size-capped log rotation, path-portable `freqchecker.spec`. 50 tests.
 - **2026-08-21 — v1.2** — FxSound tokens, Manrope, `Hann FFT` visualizer, `Quick 250 Hz` + sub-bass toggle, `Z` undo, `Back/Home`, responsive splitters + scroll, `Premium HTML` report, frameless maximize.
 - **2026-08-14 — v1.1** — Dual confidence, cross-channel differential, bisection `1/12` octave, outlier retest.

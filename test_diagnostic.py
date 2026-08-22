@@ -14,7 +14,7 @@ from models import (
     Measurement, Region, ChannelResult, Session,
     Classification, Stage, RegionCategory, practical_round_freq
 )
-from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler
+from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler, RangeScanScheduler, RangeScanConfig
 from audio_engine import AudioEngine
 import fx_theme
 
@@ -379,6 +379,169 @@ class TestSchedulerIntegration(unittest.TestCase):
         self.assertEqual(reason, "REFINEMENTS_ADDED")
         self.assertGreater(count, 0)
         self.assertLessEqual(self.scheduler.global_refine_count, 24)
+
+
+class TestRangeScanScheduler(unittest.TestCase):
+    """
+    Range Scan mode (v1.5): coarse linear pass over a user band, then
+    shrinking-step refinement of every GOOD<->NOT-GOOD transition to ±5 Hz.
+    """
+
+    def _run_scan(self, rater_func, f_start, f_end, max_steps=300):
+        sched = RangeScanScheduler(f_start, f_end)
+        sched.start_channel("left")
+        controller = DiagnosticController(mode="detailed")
+        steps = 0
+        while steps < max_steps:
+            steps += 1
+            item = sched.get_current_test()
+            if item is None:
+                action, reason, _ = sched.handle_phase_transition(controller)
+                if action in ("ABORT", "COMPLETE"):
+                    return sched, action, reason
+                continue
+            heard, clarity = rater_func(item["freq"], item["stage"])
+            m = Measurement(frequency_hz=item["freq"], channel="left", stage=item["stage"],
+                            heard=heard, clarity=clarity)
+            sched.record_measurement(m, controller)
+        raise AssertionError("Range scan did not terminate within max_steps")
+
+    def test_coarse_queue_spacing_and_bounds(self):
+        sched = RangeScanScheduler(250.0, 1000.0)
+        sched.start_channel("left")
+        freqs = [item["freq"] for item in sched.test_queue]
+        self.assertEqual(freqs[0], 250.0)
+        self.assertEqual(freqs[-1], 1000.0)
+        self.assertLessEqual(len(freqs), RangeScanConfig.COARSE_MAX_POINTS)
+        self.assertTrue(all(250.0 <= f <= 1000.0 for f in freqs))
+        self.assertEqual(len(set(freqs)), len(freqs))
+        self.assertTrue(all(item["stage"] == Stage.RANGE for item in sched.test_queue))
+
+    def test_narrow_band_uses_min_step(self):
+        sched = RangeScanScheduler(500.0, 520.0)
+        sched.start_channel("left")
+        freqs = [item["freq"] for item in sched.test_queue]
+        self.assertEqual(len(freqs), 5)  # 20 Hz span / 5 Hz min step, endpoints inclusive
+        self.assertEqual(freqs[-1], 520.0)
+
+    def test_invalid_band_rejected(self):
+        with self.assertRaises(ValueError):
+            RangeScanScheduler(500.0, 400.0).validate_band()
+        with self.assertRaises(ValueError):
+            RangeScanScheduler(10.0, 1000.0).validate_band()  # below BAND_MIN_HZ
+        with self.assertRaises(ValueError):
+            RangeScanScheduler(1000.0, 30000.0).validate_band()  # above BAND_MAX_HZ
+
+    def test_notch_converges_within_tolerance(self):
+        def notch_rater(freq, stage):
+            if 435.0 <= freq <= 470.0:
+                return False, 0
+            return True, 8
+
+        sched, action, reason = self._run_scan(notch_rater, 250.0, 1000.0)
+        self.assertEqual(action, "COMPLETE")
+        self.assertNotEqual(reason, "BAND_SILENT")
+        regions = sched.build_regions()
+        self.assertEqual(len(regions), 1)
+        reg = regions[0]
+        # Boundary located within ~one final bracket (±5 Hz target, ±10 asserted for float rounding)
+        self.assertGreaterEqual(reg.f_low, 425.0)
+        self.assertLessEqual(reg.f_low, 445.0)
+        self.assertGreaterEqual(reg.f_high, 460.0)
+        self.assertLessEqual(reg.f_high, 480.0)
+        self.assertFalse(reg.lower_boundary_open)
+        self.assertFalse(reg.upper_boundary_open)
+        self.assertGreaterEqual(reg.uncertainty_pct, 3.0)
+        self.assertLessEqual(reg.uncertainty_pct, 50.0)
+        self.assertTrue(all(p.stage == Stage.RANGE for p in reg.points))
+        self.assertGreater(reg.effective_bad_count, 0)
+
+    def test_multi_dip_independent_regions(self):
+        def two_dips(freq, stage):
+            if 300.0 <= freq <= 350.0 or 700.0 <= freq <= 750.0:
+                return False, 0
+            return True, 8
+
+        sched, action, reason = self._run_scan(two_dips, 250.0, 1000.0)
+        self.assertEqual(action, "COMPLETE")
+        regions = sched.build_regions()
+        self.assertEqual(len(regions), 2)
+        low_reg, high_reg = sorted(regions, key=lambda r: r.f_low)
+        self.assertLess(low_reg.f_high, 400.0)
+        self.assertGreater(high_reg.f_low, 600.0)
+
+    def test_band_edge_dip_has_open_upper_boundary(self):
+        def edge_dip(freq, stage):
+            if freq >= 900.0:
+                return False, 0
+            return True, 8
+
+        sched, action, reason = self._run_scan(edge_dip, 250.0, 1000.0)
+        self.assertEqual(action, "COMPLETE")
+        regions = sched.build_regions()
+        self.assertEqual(len(regions), 1)
+        reg = regions[0]
+        self.assertTrue(reg.upper_boundary_open)
+        self.assertFalse(reg.lower_boundary_open)
+        self.assertAlmostEqual(reg.f_high, 1000.0, delta=0.5)
+        self.assertGreaterEqual(reg.f_low, 885.0)
+        self.assertLessEqual(reg.f_low, 915.0)
+
+    def test_band_silent_shortcut_skips_refinement(self):
+        def deaf_rater(freq, stage):
+            return False, 0
+
+        sched, action, reason = self._run_scan(deaf_rater, 250.0, 1000.0)
+        self.assertEqual(action, "COMPLETE")
+        self.assertEqual(reason, "BAND_SILENT")
+        self.assertEqual(sched.refine_probe_count, 0)
+        regions = sched.build_regions()
+        self.assertEqual(len(regions), 1)
+        self.assertTrue(regions[0].lower_boundary_open)
+        self.assertTrue(regions[0].upper_boundary_open)
+
+    def test_adversarial_alternating_rater_terminates_within_budget(self):
+        calls = {"n": 0}
+
+        def alternating_rater(freq, stage):
+            calls["n"] += 1
+            heard = (calls["n"] % 2 == 1)
+            return heard, 8 if heard else 0
+
+        sched, action, reason = self._run_scan(alternating_rater, 250.0, 1000.0)
+        self.assertEqual(action, "COMPLETE")
+        self.assertLessEqual(sched.refine_probe_count, RangeScanConfig.MAX_REFINE_PROBES_TOTAL)
+
+    def test_fuzz_no_duplicate_probes_all_in_band(self):
+        for seed in range(20):
+            rng = random.Random(seed)
+
+            def random_rater(freq, stage):
+                heard = rng.random() > 0.3
+                return heard, rng.randint(0, 10) if heard else 0
+
+            sched, action, reason = self._run_scan(random_rater, 200.0, 2000.0)
+            self.assertEqual(action, "COMPLETE", f"seed {seed}")
+            rated = sorted(m.frequency_hz for m in sched.active_measurements)
+            self.assertTrue(all(200.0 <= f <= 2000.0 for f in rated), f"seed {seed}")
+            for a, b in zip(rated, rated[1:]):
+                self.assertGreaterEqual(b - a, 0.99, f"seed {seed}: duplicate probes {a}/{b}")
+
+    def test_undo_rewinds_cursor_to_same_probe(self):
+        sched = RangeScanScheduler(250.0, 1000.0)
+        sched.start_channel("left")
+        controller = DiagnosticController(mode="detailed")
+        first_three = []
+        for _ in range(3):
+            item = sched.get_current_test()
+            first_three.append(item["freq"])
+            sched.record_measurement(Measurement(
+                frequency_hz=item["freq"], channel="left", stage=item["stage"],
+                heard=True, clarity=8))
+        sched.undo_last_measurement()
+        self.assertEqual(len(sched.active_measurements), 2)
+        current = sched.get_current_test()
+        self.assertEqual(current["freq"], first_three[2])
 
 
 class TestPropertyBasedInvariantFuzz(unittest.TestCase):

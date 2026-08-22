@@ -23,6 +23,7 @@ class Stage:
     REFINE = "refine"
     MANUAL = "manual"
     SWEEP = "sweep"
+    RANGE = "range"
 
 
 class RegionCategory:

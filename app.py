@@ -29,7 +29,7 @@ from models import (
     Classification, Stage, RegionCategory, practical_round_freq
 )
 from audio_engine import AudioEngine
-from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler
+from diagnostic_core import DiagnosticController, DiagnosticConfig, TestScheduler, RangeScanScheduler, RangeScanConfig
 from ui_components import LogFrequencyPlotWidget, FxSpectrumVisualizerWidget
 import fx_theme
 from fx_theme import DARK_THEME_QSS, LIGHT_THEME_QSS, get_fx_color
@@ -338,6 +338,7 @@ class FreqCheckerApp(QMainWindow):
         self._max_queue_len: int = 0
         self._sweep_retest_active: bool = False
         self._manual_retest_freqs: List[float] = []
+        self._range_scan_active: bool = False
         
         # Music state
         self.music_original: Optional[Any] = None
@@ -356,6 +357,7 @@ class FreqCheckerApp(QMainWindow):
         # Diagnostic Controller & Pure Test Scheduler
         self.controller = DiagnosticController(mode="detailed")
         self.scheduler = TestScheduler(mode="detailed")
+        self._range_scan_active = False
         
         # Central Widget (frameless wrapper if enabled)
         self.central_widget = QWidget()
@@ -1029,6 +1031,55 @@ class FreqCheckerApp(QMainWindow):
         btn_row.addWidget(self.btn_sweep)
         btn_row.addWidget(self.btn_music)
         cr_layout.addLayout(btn_row)
+
+        # Range Scan — precise boundary finder (v1.5)
+        rs_sep = QFrame()
+        rs_sep.setFrameShape(QFrame.HLine)
+        rs_sep.setStyleSheet(f"color: {get_fx_color('card_border', True)}; background-color: {get_fx_color('card_border', True)}; max-height: 1px; border: none;")
+        cr_layout.addWidget(rs_sep)
+        rs_title = QLabel("Range Scan — Precise Boundary Finder")
+        rs_title.setProperty("class", "section-title")
+        cr_layout.addWidget(rs_title)
+        rs_hint = QLabel("Scan a band you choose (20 Hz – 20 kHz), then it zooms into every spot where hearing drops out and pins each boundary to ±5 Hz.")
+        rs_hint.setWordWrap(True)
+        rs_hint.setStyleSheet("color: #7f7f7f; font-size: 11px;")
+        cr_layout.addWidget(rs_hint)
+        scan_band_row = QHBoxLayout()
+        scan_band_row.addWidget(QLabel("From:"))
+        self.spin_scan_start = QDoubleSpinBox()
+        self.spin_scan_start.setRange(20.0, 19990.0)
+        self.spin_scan_start.setValue(250.0)
+        self.spin_scan_start.setDecimals(0)
+        self.spin_scan_start.setSuffix(" Hz")
+        self.spin_scan_start.setFixedWidth(110)
+        scan_band_row.addWidget(self.spin_scan_start)
+        scan_band_row.addWidget(QLabel("To:"))
+        self.spin_scan_end = QDoubleSpinBox()
+        self.spin_scan_end.setRange(30.0, 20000.0)
+        self.spin_scan_end.setValue(1000.0)
+        self.spin_scan_end.setDecimals(0)
+        self.spin_scan_end.setSuffix(" Hz")
+        self.spin_scan_end.setFixedWidth(110)
+        scan_band_row.addWidget(self.spin_scan_end)
+        self.combo_scan_ch = QComboBox()
+        self.combo_scan_ch.addItem("Both (L -> R)", "both")
+        self.combo_scan_ch.addItem("Left Only", "left")
+        self.combo_scan_ch.addItem("Right Only", "right")
+        scan_band_row.addWidget(self.combo_scan_ch)
+        scan_band_row.addStretch()
+        cr_layout.addLayout(scan_band_row)
+        self.lbl_scan_validate = QLabel("")
+        self.lbl_scan_validate.setStyleSheet("color: #7f7f7f; font-size: 11px;")
+        cr_layout.addWidget(self.lbl_scan_validate)
+        self.spin_scan_start.valueChanged.connect(self._validate_scan_band)
+        self.spin_scan_end.valueChanged.connect(self._validate_scan_band)
+        self.btn_range_scan = QPushButton("Start Range Scan")
+        self.btn_range_scan.setIcon(get_svg_icon("zap", color="#FFFFFF"))
+        self.btn_range_scan.setIconSize(QSize(16, 16))
+        self.btn_range_scan.clicked.connect(self._start_range_scan)
+        cr_layout.addWidget(self.btn_range_scan)
+        self._validate_scan_band()
+
         cr_layout.addStretch()
         self.wizard_splitter.addWidget(col_right)
         
@@ -1392,9 +1443,10 @@ class FreqCheckerApp(QMainWindow):
         self.audio_engine.stop_playback()
         # Dead-output guard: hearing none of the first rated midrange tones means
         # the output chain is muted/dead — abort now instead of dragging the user
-        # through the entire coarse pass.
+        # through the entire coarse pass. (Range Scan has its own band-silent shortcut.)
         if (
             not self.scheduler.manual_mode
+            and not getattr(self, "_range_scan_active", False)
             and self.controller.check_early_output_failure(self.scheduler.active_measurements)
         ):
             self._finalize_channel(is_global_problem=True, global_problem_type="GLOBAL_OUTPUT_FAILURE")
@@ -1795,6 +1847,7 @@ class FreqCheckerApp(QMainWindow):
         self.scheduler = TestScheduler(mode="quick")
         self._manual_retest_freqs = freqs
         self.scheduler.manual_mode = True
+        self._range_scan_active = False
         self.blind_mode = self.chk_blind.isChecked()
         self._sweep_retest_active = True
         self._start_channel_test(ch)
@@ -2411,6 +2464,63 @@ class FreqCheckerApp(QMainWindow):
             output_device_name=dev_name,
             channel_mode=ch_mode
         )
+        self._range_scan_active = False
+        self._start_channel_test(self.current_channel)
+
+    def _validate_scan_band(self):
+        f_start = float(self.spin_scan_start.value())
+        f_end = float(self.spin_scan_end.value())
+        if not (RangeScanConfig.BAND_MIN_HZ <= f_start < f_end <= RangeScanConfig.BAND_MAX_HZ):
+            self.lbl_scan_validate.setText("[Alert] Invalid band: needs 20 Hz ≤ From < To ≤ 20,000 Hz.")
+            self.lbl_scan_validate.setStyleSheet("color: #ff4d4f; font-size: 11px;")
+            self.btn_range_scan.setEnabled(False)
+            return
+        span = f_end - f_start
+        step = max(span / (RangeScanConfig.COARSE_MAX_POINTS - 1), RangeScanConfig.MIN_STEP_HZ)
+        n_coarse = min(RangeScanConfig.COARSE_MAX_POINTS, int(span / step) + 1)
+        msg = f"Band {f_start:,.0f}–{f_end:,.0f} Hz · ~{n_coarse} coarse tones + refinement · boundary accuracy ±5 Hz"
+        if f_start > 0 and (f_end / f_start) > 8.0:
+            msg += " · wide band: a Detailed diagnostic may be quicker for a first overview"
+            self.lbl_scan_validate.setStyleSheet("color: #faad14; font-size: 11px;")
+        else:
+            self.lbl_scan_validate.setStyleSheet("color: #7f7f7f; font-size: 11px;")
+        self.lbl_scan_validate.setText(msg)
+        self.btn_range_scan.setEnabled(True)
+
+    def _start_range_scan(self):
+        f_start = float(self.spin_scan_start.value())
+        f_end = float(self.spin_scan_end.value())
+        ch_mode = self.combo_scan_ch.currentData()
+        try:
+            scheduler = RangeScanScheduler(f_start, f_end)
+            scheduler.validate_band()
+        except ValueError as e:
+            QMessageBox.warning(self, "Range Scan", str(e))
+            return
+        if ch_mode == "left":
+            self.channels_to_test = ["left"]
+        elif ch_mode == "right":
+            self.channels_to_test = ["right"]
+        else:
+            self.channels_to_test = ["left", "right"]
+        self.channel_idx = 0
+        self.current_channel = self.channels_to_test[0]
+        self.controller = DiagnosticController(mode="detailed")
+        self.scheduler = scheduler
+        self._range_scan_active = True
+        self.blind_mode = self.chk_blind.isChecked()
+        self._sweep_retest_active = False
+        self.start_time = time.time()
+        self.session = Session(
+            mode="range_scan",
+            sample_rate=self.audio_engine.sample_rate,
+            duration_per_tone=2.0,
+            peak_level=0.4,
+            fxsound_disabled=self.chk_fxsound.isChecked(),
+            enhancements_disabled=self.chk_enhancements.isChecked(),
+            output_device_name=self.device_combo.currentText(),
+            channel_mode=ch_mode
+        )
         self._start_channel_test(self.current_channel)
 
     def _start_channel_test(self, channel: str):
@@ -2542,17 +2652,24 @@ class FreqCheckerApp(QMainWindow):
         anchor = self.controller.rating_anchor(active_meas)
         controls_ok = self.controller.check_control_stability(active_meas)
         analyze_regions = not is_global_problem and not self._sweep_retest_active
-        regions = self.controller.detect_regions(active_meas, self.current_channel) if analyze_regions else []
         scored_regions = []
         if analyze_regions:
-            for reg in regions:
-                reg = self.controller.expand_region_boundaries(reg, active_meas)
+            if self._range_scan_active and hasattr(self.scheduler, "build_regions"):
+                raw_regions = self.scheduler.build_regions(self.controller)
+            else:
+                raw_regions = self.controller.detect_regions(active_meas, self.current_channel)
+            for reg in raw_regions:
+                if not self._range_scan_active:
+                    reg = self.controller.expand_region_boundaries(reg, active_meas)
                 scored = self.controller.score_region(
                     reg,
                     active_meas,
                     fxsound_disabled=self.session.fxsound_disabled,
                     enhancements_disabled=self.session.enhancements_disabled
                 )
+                if self._range_scan_active:
+                    half_hz = max((scored.end_estimate - scored.start_estimate) / 2.0, (scored.f_high - scored.f_low) / 2.0)
+                    scored.evidence = f"range scan: {len(scored.points)} probes, boundary ±{half_hz:.1f} Hz; " + scored.evidence
                 scored_regions.append(scored)
         valid_m = [m for m in active_meas if not m.input_error]
         avg_clarity = (sum(m.clarity for m in valid_m) / float(len(valid_m))) if valid_m else 0.0

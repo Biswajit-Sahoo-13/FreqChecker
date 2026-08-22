@@ -63,10 +63,11 @@ New class `RangeScanScheduler` exposing the same interface as `TestScheduler`
 ### Phases
 1. **Coarse pass** — `step = max(span / (COARSE_MAX_POINTS − 1), MIN_STEP_HZ)`;
    enqueue evenly spaced probes from start to end inclusive, rounded to 0.1 Hz.
-2. **Classification** — per point, reuse `DiagnosticController.effective_classification`
-   with the session anchor (controls inside the band feed `rating_anchor`; otherwise the
-   mid-high-coarse fallback or 8.0 default applies). GOOD vs BAD/BORDERLINE defines the
-   perceived boundary.
+2. **Classification** — per point, reuse `DiagnosticController.effective_classification`.
+   Within a scan the personal anchor is the median quality of heard probes once ≥ 4
+   exist (band probes are Stage.RANGE, so the coarse-grid fallback tiers of
+   `rating_anchor` do not apply), else the 8.0 nominal. GOOD vs BAD/BORDERLINE
+   defines the perceived boundary. *(Amended during implementation to match code.)*
 3. **Band-silent shortcut** — after the coarse pass, if fewer than 20% of probes are
    effectively GOOD, skip refinement and emit one whole-band region with evidence
    *"entire band inaudible — verify volume/output device"* (prevents dozens of pointless
