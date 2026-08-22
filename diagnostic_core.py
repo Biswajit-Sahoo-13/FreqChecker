@@ -1059,7 +1059,7 @@ class RangeScanScheduler:
         self.current_idx -= 1
 
     # ------------------------------------------------------- classification
-    def _scan_anchor(self) -> float:
+    def scan_anchor(self) -> float:
         """
         Personal anchor for the scan band: median quality of heard probes once
         >= 4 exist, else the standard 8.0 nominal. (Band probes are Stage.RANGE,
@@ -1092,7 +1092,7 @@ class RangeScanScheduler:
             self._complete = True
             return "COMPLETE", "NO_DATA", 0
 
-        anchor = self._scan_anchor()
+        anchor = self.scan_anchor()
 
         if not self._coarse_analyzed:
             self._coarse_analyzed = True
@@ -1144,7 +1144,7 @@ class RangeScanScheduler:
             [m for m in self.active_measurements if not m.input_error],
             key=lambda x: x.frequency_hz
         )
-        anchor = self._scan_anchor()
+        anchor = self.scan_anchor()
 
         regions: List[Region] = []
         runs: List[List[Measurement]] = []

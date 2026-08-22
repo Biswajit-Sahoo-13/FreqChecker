@@ -68,7 +68,7 @@ $$f_{\text{end\_est}} = \sqrt{f_{\text{bad\_last}} \times f_{\text{good\_above}}
 - **Coarse pass**: evenly spaced linear probes, $\text{step} = \max\left(\frac{f_{end}-f_{start}}{23},\ 5\text{ Hz}\right)$, ≤ 24 probes, endpoints inclusive.
 - **Classification**: anchor-relative (`effective_classification`) with a scan-personal anchor: median quality of heard probes once ≥ 4 exist, else the 8.0 nominal.
 - **Refinement**: every adjacent GOOD↔NOT-GOOD bracket receives probes at its 25/50/75% points; brackets close when width ≤ 10 Hz (**±5 Hz boundary accuracy**). Caps: 7 rounds per bracket, 60 refine probes total ⇒ worst case ~84 tones and guaranteed termination for arbitrary rater sequences.
-- **Band-silent shortcut**: after the coarse pass, < 20% effectively-GOOD probes ⇒ one whole-band region ("verify volume/output device"), no refinement.
+- **Band-silent shortcut**: after the coarse pass, < 20% effectively-GOOD probes ⇒ the channel finalizes as a global `BAND_SILENT` guidance state ("verify volume/output device and rating anchor — not a speaker fault verdict"); no region is emitted and no refinement runs. This prevents a muted-output or low-rating session from being scored as a high-confidence false anomaly.
 - **Boundaries**: arithmetic midpoints of the final closing pairs (the scan grid is linear); `uncertainty_pct = max side-gap / center × 100`, clamped 3–50%. Regions then flow through standard `score_region` confidence math with evidence prefixed `range scan: N probes, boundary ±X Hz`.
 
 ---

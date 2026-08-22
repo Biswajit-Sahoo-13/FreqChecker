@@ -543,6 +543,75 @@ class TestRangeScanScheduler(unittest.TestCase):
         current = sched.get_current_test()
         self.assertEqual(current["freq"], first_three[2])
 
+    def test_scan_anchor_uses_heard_median(self):
+        sched = RangeScanScheduler(500.0, 520.0)
+        for f, heard, clarity in [(500.0, True, 6), (505.0, True, 6), (510.0, True, 8), (515.0, True, 8), (520.0, False, 0)]:
+            sched.active_measurements.append(Measurement(
+                frequency_hz=f, channel="left", stage=Stage.RANGE, heard=heard, clarity=clarity))
+        # Median of heard qualities (6,6,8,8) = 7.0; not-heard probes excluded
+        self.assertEqual(sched.scan_anchor(), 7.0)
+
+
+class TestRangeScanUiIntegration(unittest.TestCase):
+    """
+    App-level regression: a fully inaudible scan band must route to the
+    BAND_SILENT guidance state — NOT a scored high-confidence anomaly region.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            cls._app = QApplication([])
+        else:
+            cls._app = QApplication.instance()
+
+    def _make_window(self):
+        import app as app_module
+        # Hermetic construction: no real device enumeration, no preflight thread
+        orig_devices = app_module.AudioEngine.get_output_devices
+        orig_preflight = app_module.FreqCheckerApp._run_preflight_autodetect
+        app_module.AudioEngine.get_output_devices = staticmethod(lambda: [])
+        app_module.FreqCheckerApp._run_preflight_autodetect = lambda self: None
+        try:
+            win = app_module.FreqCheckerApp(frameless=False)
+        finally:
+            app_module.AudioEngine.get_output_devices = orig_devices
+            app_module.FreqCheckerApp._run_preflight_autodetect = orig_preflight
+        # No real audio during the driven flow
+        win.audio_engine.play_audio = lambda *a, **k: None
+        win.audio_engine.stop_playback = lambda: None
+        return win
+
+    def test_deaf_band_routes_to_guidance_not_false_anomaly(self):
+        win = self._make_window()
+        win.combo_scan_ch.setCurrentIndex(1)  # Left Only
+        win._start_range_scan()
+        self.assertEqual(win.stack.currentIndex(), 1)  # PAGE_TESTING
+        # Rate every probe "not heard" (muted-output scenario)
+        guard = 0
+        while win.scheduler.get_current_test() is not None and guard < 200:
+            guard += 1
+            win._tone_started_at = time.time() - 1.0  # satisfy 0.25 s min-listen debounce
+            win._record_current_response(False, 0, None)
+        res = win.session.channel_results["left"]
+        self.assertTrue(res.is_global_problem)
+        self.assertEqual(res.global_problem_type, "BAND_SILENT")
+        self.assertEqual(res.regions, [])
+        self.assertEqual(res.rating_anchor, 8.0)  # nominal anchor (nothing heard)
+        self.assertIn("SCAN BAND INAUDIBLE", win.session.generate_report())
+        self.assertIn("not a speaker fault verdict", win.session.generate_report().lower())
+
+    def test_bass_zone_band_shows_warning(self):
+        win = self._make_window()
+        win.spin_scan_start.setValue(100.0)
+        win.spin_scan_end.setValue(250.0)
+        win._validate_scan_band()
+        self.assertIn("bass-zone", win.lbl_scan_validate.text())
+        win.spin_scan_end.setValue(1000.0)
+        win._validate_scan_band()
+        self.assertNotIn("bass-zone", win.lbl_scan_validate.text())
+
 
 class TestPropertyBasedInvariantFuzz(unittest.TestCase):
     def test_property_based_invariant_fuzz(self):

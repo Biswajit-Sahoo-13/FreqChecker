@@ -2482,6 +2482,9 @@ class FreqCheckerApp(QMainWindow):
         if f_start > 0 and (f_end / f_start) > 8.0:
             msg += " · wide band: a Detailed diagnostic may be quicker for a first overview"
             self.lbl_scan_validate.setStyleSheet("color: #faad14; font-size: 11px;")
+        elif f_end <= 250.0:
+            msg += " · bass-zone band: expected roll-off below ~250 Hz may be reported as an anomaly (the scan cannot see recovery above the band)"
+            self.lbl_scan_validate.setStyleSheet("color: #faad14; font-size: 11px;")
         else:
             self.lbl_scan_validate.setStyleSheet("color: #7f7f7f; font-size: 11px;")
         self.lbl_scan_validate.setText(msg)
@@ -2621,7 +2624,13 @@ class FreqCheckerApp(QMainWindow):
             freq = item["freq"]
             self._tone_started_at = time.time()
             self.last_playback_ok = None
-            tone = self.audio_engine.generate_sine_tone(freq, duration_s=2.0, channel=self.current_channel)
+            try:
+                tone = self.audio_engine.generate_sine_tone(freq, duration_s=2.0, channel=self.current_channel)
+            except ValueError as e:
+                # Rare: device sample rate too low for this frequency (Nyquist guard)
+                if self.stack.currentIndex() == PAGE_TESTING:
+                    self.lbl_stage_info.setText(f"[Alert] {e} Choose a lower band and restart the scan.")
+                return
             self.audio_engine.play_audio(
                 tone,
                 on_started=lambda: self.audio_bridge.playback_started.emit(freq),
@@ -2644,12 +2653,20 @@ class FreqCheckerApp(QMainWindow):
         elif action == "CONTINUE":
             self._present_next_test()
         else:
+            # A silent band is a global condition (volume/device/rating scale), not an
+            # anomaly region — scoring it would fabricate a high-confidence false positive.
+            if reason_or_status == "BAND_SILENT":
+                self._finalize_channel(is_global_problem=True, global_problem_type="BAND_SILENT")
+                return
             result_key = "sweep" if self._sweep_retest_active else None
             self._finalize_channel(is_global_problem=False, result_key=result_key)
 
     def _finalize_channel(self, is_global_problem: bool = False, global_problem_type: str = "", result_key: Optional[str] = None):
         active_meas = self.scheduler.active_measurements
-        anchor = self.controller.rating_anchor(active_meas)
+        if self._range_scan_active and hasattr(self.scheduler, "scan_anchor"):
+            anchor = self.scheduler.scan_anchor()  # RANGE-stage probes fall outside rating_anchor's COARSE tiers
+        else:
+            anchor = self.controller.rating_anchor(active_meas)
         controls_ok = self.controller.check_control_stability(active_meas)
         analyze_regions = not is_global_problem and not self._sweep_retest_active
         scored_regions = []
