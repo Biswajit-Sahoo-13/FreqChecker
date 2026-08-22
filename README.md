@@ -101,7 +101,7 @@ FreqChecker/                          # ← https://github.com/Biswajit-Sahoo-13
     ├── fx_theme.py                    # FxSound Design Tokens (27), Dual-Theme QSS & Font Loader
     ├── icons.py                       # Vector SVG Icon Renderer (no platform emoji)
     ├── fonts/Manrope.ttf              # Bundled UI Typeface
-    ├── test_diagnostic.py             # Automated Unit Test Suite (60 tests, 500-iter fuzz + oracle)
+    ├── test_diagnostic.py             # Automated Unit Test Suite (63 tests, 500-iter fuzz + oracle)
     ├── build_exe.py                   # Optimized Selective PyInstaller Packaging Script
     ├── requirements.txt               # Dependency Manifest (compatible version ranges)
     ├── TECH_SPECS_AND_OPTIMIZATION.md # Comprehensive Algorithms & Performance Specs
@@ -282,7 +282,7 @@ flowchart LR
 
 ### 4) Other Modes
 
-- **Range Scan:** set `From/To Hz` (20–20 000) + channel on the Wizard, press `Start Range Scan`; rate each probe like the guided test (`Y/N`, `0–9`). Every detected drop-out is refined automatically until its boundary is pinned to ±5 Hz; results appear as precise ranges in the dashboard/report.
+- **Range Scan:** set `From/To Hz` (20–20 000) + channel on the Wizard, press `Start Range Scan`; rate each probe like the guided test (`Y/N`, `0–9`). Every detected drop-out is refined automatically until its boundary is pinned to ±5 Hz; results appear as precise ranges in the dashboard/report. If the whole band is inaudible, you'll get a "check volume/output device" guidance card instead of an anomaly.
 - **Manual:** pick freq via spinbox or log slider `20·(1000)^(pos/1000)`, waveform, channel, duration, Play/Stop.
 - **Sweep:** set `10–60 s`, `Both/L/R`, `Start Sweep`, tap `Space` or `Mark Anomaly` with `35 ms` compensation, list appears on right, then `Retest Marked Frequencies` if offered.
 - **Music:** `Load Track` (`soundfile`), `Both/L/R` instant switch, volume `0–100%`, seek `0–1000` permille, `Play/Pause/Stop`.
@@ -329,14 +329,14 @@ A: Results → `Export Premium Report (.html)` → open in Edge/Chrome → `Ctrl
 | **2 — Stability** | `generation` thread guard, `QTimer` singleShot, partial-save, `faulthandler` | ✅ Done |
 | **3 — UX** | Frameless `38px` title (`— □ X`), logo `→ Home`, `Back` history, responsive `QScrollArea`, single `Play/Stop` toggle, `Z` undo | ✅ Done |
 | **4 — Performance** | `58.17 MB` `—onefile`, `960×640` min, `30 FPS` only while playing | ✅ Done |
-| **5 — Release** | `60` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
+| **5 — Release** | `63` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
 | **6 — Future** | Optional: mic-calibrated measurement, `OutputStream` gapless A/B, per-channel EQ overlay, `MuseScore` export | 🔜 Planned |
 
 ---
 
 ## 📝 Changelog
 
-- **2026-08-22 — v1.5** — New **Range Scan** mode: scan a user-selected band (20 Hz – 20 kHz), auto-refine every perceived drop-out boundary to ±5 Hz with bounded shrinking-step probing; results integrate into report/exports/cross-channel; band-silent shortcut; scan-personal anchor; 60 tests. Design spec: `docs/superpowers/specs/2026-08-22-range-scan-design.md`.
+- **2026-08-22 — v1.5** — New **Range Scan** mode: scan a user-selected band (20 Hz – 20 kHz), auto-refine every perceived drop-out boundary to ±5 Hz with bounded shrinking-step probing; results integrate into report/exports/cross-channel; a fully inaudible band routes to a `Scan Band Inaudible` guidance state (check volume/device/rating anchor) instead of a false anomaly; reports show the real scan anchor; bass-zone band warning; Nyquist-guarded scan playback on low-rate devices; 63 tests. Design spec: `docs/superpowers/specs/2026-08-22-range-scan-design.md`.
 - **2026-08-22 — v1.3** — Audit hardening: `Z`-undo now reverts retest resolutions (no silent data whitewash), anchor-relative `RATING_SCALE_LOW` (consistent conservative raters no longer falsely aborted), mid-coarse early dead-output abort, music mode RAM bounds (10-min cap + 5-min windows + single resident copy), Back button stops playback, blind mode hides the live plot, crash log + partial saves relocated to `%APPDATA%\FreqChecker` with size-capped log rotation, path-portable `freqchecker.spec`. 50 tests.
 - **2026-08-21 — v1.2** — FxSound tokens, Manrope, `Hann FFT` visualizer, `Quick 250 Hz` + sub-bass toggle, `Z` undo, `Back/Home`, responsive splitters + scroll, `Premium HTML` report, frameless maximize.
 - **2026-08-14 — v1.1** — Dual confidence, cross-channel differential, bisection `1/12` octave, outlier retest.
