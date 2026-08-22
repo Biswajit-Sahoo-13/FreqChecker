@@ -23,6 +23,7 @@ class Stage:
     REFINE = "refine"
     MANUAL = "manual"
     SWEEP = "sweep"
+    RANGE = "range"
 
 
 class RegionCategory:
@@ -152,7 +153,7 @@ class ChannelResult:
     avg_clarity: float = 0.0
     rating_anchor: float = 8.0
     is_global_problem: bool = False
-    global_problem_type: str = ""  # "GLOBAL_OUTPUT_FAILURE", "GLOBAL_OUTPUT_UNCERTAIN", "RATING_SCALE_LOW"
+    global_problem_type: str = ""  # "GLOBAL_OUTPUT_FAILURE", "GLOBAL_OUTPUT_UNCERTAIN", "RATING_SCALE_LOW", "BAND_SILENT"
     is_control_unstable: bool = False
     status_summary: str = ""
 
@@ -280,6 +281,13 @@ class Session:
                     lines.append("      Possible causes: Low nominal volume, ambient room noise, listener hearing variation,")
                     lines.append("      or intermittent audio driver filtering.")
                     lines.append("      Recommendation: Verify playback volume, test with headphones to rule out acoustic limits, and re-run.")
+                elif res.global_problem_type == "BAND_SILENT":
+                    lines.append("  [?] SCAN BAND INAUDIBLE")
+                    lines.append("      Fewer than 20% of the scanned band's probes were clearly audible.")
+                    lines.append("      Possible causes: Volume too low or muted, wrong output device, or ratings far below")
+                    lines.append("      your personal calibration anchor.")
+                    lines.append("      Recommendation: Verify volume and device, replay the 1 kHz calibration tone, then re-scan.")
+                    lines.append("      This is NOT a speaker fault verdict.")
                 else:
                     lines.append("  [!] GLOBAL OUTPUT FAILURE DETECTED")
                     lines.append("      Mid-range and high test frequencies were inaudible or severely degraded (< 25% heard).")
@@ -421,6 +429,8 @@ class Session:
                     status_html = '<span class="badge warn">Low Rating Scale</span><p class="callout warn">All tones audible but rated low — volume too low or conservative rating. Not a hardware failure. Increase volume and replay 1 kHz calibration.</p>'
                 elif res.global_problem_type == "GLOBAL_OUTPUT_UNCERTAIN":
                     status_html = '<span class="badge warn">Uncertain Output</span><p class="callout warn">Partial audibility 25–75% with low quality. Check volume, room noise, or test with headphones.</p>'
+                elif res.global_problem_type == "BAND_SILENT":
+                    status_html = '<span class="badge warn">Scan Band Inaudible</span><p class="callout warn">Under 20% of the scanned band was clearly audible. Check volume/output device and your rating anchor, then re-scan. This is not a speaker fault verdict.</p>'
                 else:
                     status_html = '<span class="badge danger">Output Failure</span><p class="callout danger">Mid/high frequencies inaudible &lt;25% heard. Check mute, device, driver or heavy filter.</p>'
                 regions_block = ""

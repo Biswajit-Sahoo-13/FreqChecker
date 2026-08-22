@@ -954,3 +954,276 @@ class TestScheduler:
             return "CONTINUE", "REFINEMENTS_ADDED", len(self.test_queue) - initial_len
 
         return "COMPLETE", "PHASE_DONE", 0
+
+
+class RangeScanConfig:
+    BAND_MIN_HZ = 20.0
+    BAND_MAX_HZ = 20000.0
+    COARSE_MAX_POINTS = 24
+    MIN_STEP_HZ = 5.0
+    REFINE_PROBES_PER_ROUND = 3  # at 25% / 50% / 75% of each open bracket
+    MAX_ROUNDS_PER_BRACKET = 7
+    MAX_REFINE_PROBES_TOTAL = 60
+    BRACKET_CLOSE_WIDTH_HZ = 10.0  # bracket resolved at <= 10 Hz (±5 Hz accuracy)
+    BAND_SILENT_RATIO = 0.20  # < 20% effectively-GOOD probes => whole-band shortcut
+
+
+class RangeScanScheduler:
+    """
+    Boundary-refinement scheduler for Range Scan mode: a coarse linear probe pass
+    across a user-selected band, then shrinking-step refinement (25/50/75% probes)
+    of every GOOD<->NOT-GOOD transition until each bracket closes at ±5 Hz.
+
+    Exposes the same interface as TestScheduler (get_current_test,
+    record_measurement, handle_phase_transition, undo_last_measurement,
+    active_measurements, test_queue, current_idx, manual_mode) so the existing
+    Testing view drives it unchanged.
+    """
+
+    def __init__(self, f_start: float, f_end: float):
+        self.config = RangeScanConfig()
+        self.f_start = float(f_start)
+        self.f_end = float(f_end)
+        self.channel: str = "left"
+        self.test_queue: List[Dict[str, Any]] = []
+        self.current_idx: int = 0
+        self.pending_freqs: set = set()
+        self.active_measurements: List[Measurement] = []
+        self.manual_mode: bool = False  # interface compatibility
+        self.refine_probe_count: int = 0
+        self._rounds_per_bracket: Dict[Tuple[float, float], int] = {}
+        self._coarse_analyzed: bool = False
+        self._complete: bool = False
+
+    # ------------------------------------------------------------------ setup
+    def validate_band(self):
+        if not (self.config.BAND_MIN_HZ <= self.f_start < self.f_end <= self.config.BAND_MAX_HZ):
+            raise ValueError(
+                f"Invalid scan band {self.f_start:.0f}-{self.f_end:.0f} Hz: "
+                f"requires {self.config.BAND_MIN_HZ:.0f} <= start < end <= {self.config.BAND_MAX_HZ:.0f} Hz."
+            )
+
+    def _build_coarse_queue(self):
+        span = self.f_end - self.f_start
+        step = max(span / (self.config.COARSE_MAX_POINTS - 1), self.config.MIN_STEP_HZ)
+        n = min(self.config.COARSE_MAX_POINTS, int(span / step) + 1)
+        freqs = [round(self.f_start + i * step, 1) for i in range(n)]
+        if freqs[-1] < self.f_end - step * 0.5:
+            freqs.append(round(self.f_end, 1))
+        for f in freqs:
+            self.enqueue(f)
+
+    def start_channel(self, channel: str):
+        self.channel = channel
+        self.validate_band()
+        self.test_queue = []
+        self.current_idx = 0
+        self.pending_freqs = set()
+        self.active_measurements = []
+        self.refine_probe_count = 0
+        self._rounds_per_bracket = {}
+        self._coarse_analyzed = False
+        self._complete = False
+        self._build_coarse_queue()
+
+    def get_current_test(self) -> Optional[Dict[str, Any]]:
+        if self.current_idx < len(self.test_queue):
+            return self.test_queue[self.current_idx]
+        return None
+
+    def enqueue(self, freq: float) -> bool:
+        key = round(float(freq), 1)
+        if key in self.pending_freqs:
+            return False
+        if any(abs(m.frequency_hz - key) < 1.0 for m in self.active_measurements):
+            return False
+        self.pending_freqs.add(key)
+        self.test_queue.append({
+            "freq": key,
+            "stage": Stage.RANGE,
+            "is_retest": False,
+            "is_control": False
+        })
+        return True
+
+    def record_measurement(self, m: Measurement, controller: Optional[DiagnosticController] = None):
+        self.active_measurements.append(m)
+        self.pending_freqs.discard(round(float(m.frequency_hz), 1))
+        self.current_idx += 1
+
+    def undo_last_measurement(self):
+        if not self.active_measurements or self.current_idx <= 0:
+            return
+        m = self.active_measurements.pop()
+        self.pending_freqs.add(round(float(m.frequency_hz), 1))
+        self.current_idx -= 1
+
+    # ------------------------------------------------------- classification
+    def scan_anchor(self) -> float:
+        """
+        Personal anchor for the scan band: median quality of heard probes once
+        >= 4 exist, else the standard 8.0 nominal. (Band probes are Stage.RANGE,
+        so the coarse-grid fallback tiers of rating_anchor do not apply here.)
+        """
+        heard_q = [m.quality for m in self.active_measurements if not m.input_error and m.heard]
+        if len(heard_q) >= 4:
+            return float(np.median(heard_q))
+        return 8.0
+
+    def _is_good(self, m: Measurement, anchor: float) -> bool:
+        return DiagnosticController.effective_classification(m, anchor) == Classification.GOOD
+
+    # ----------------------------------------------------------- transitions
+    def handle_phase_transition(self, controller: Optional[DiagnosticController] = None) -> Tuple[str, str, int]:
+        """
+        Called when the probe queue is exhausted. First call after the coarse
+        pass applies the band-silent shortcut; then repeatedly refines every
+        open GOOD<->NOT-GOOD bracket until all close (<= 10 Hz) or caps hit.
+        Returns (action, reason, count_of_new_probes).
+        """
+        if self._complete:
+            return "COMPLETE", "SCAN_DONE", 0
+
+        rated = sorted(
+            [m for m in self.active_measurements if not m.input_error],
+            key=lambda x: x.frequency_hz
+        )
+        if len(rated) < 2:
+            self._complete = True
+            return "COMPLETE", "NO_DATA", 0
+
+        anchor = self.scan_anchor()
+
+        if not self._coarse_analyzed:
+            self._coarse_analyzed = True
+            good_count = sum(1 for m in rated if self._is_good(m, anchor))
+            if good_count / float(len(rated)) < self.config.BAND_SILENT_RATIO:
+                self._complete = True
+                return "COMPLETE", "BAND_SILENT", 0
+
+        initial_len = len(self.test_queue)
+        for i in range(len(rated) - 1):
+            a, b = rated[i], rated[i + 1]
+            if self._is_good(a, anchor) == self._is_good(b, anchor):
+                continue
+            width = b.frequency_hz - a.frequency_hz
+            if width <= self.config.BRACKET_CLOSE_WIDTH_HZ:
+                continue
+            key = (round(a.frequency_hz, 1), round(b.frequency_hz, 1))
+            rounds = self._rounds_per_bracket.get(key, 0)
+            if rounds >= self.config.MAX_ROUNDS_PER_BRACKET:
+                continue
+            added = 0
+            for frac in (0.25, 0.50, 0.75):
+                if self.refine_probe_count >= self.config.MAX_REFINE_PROBES_TOTAL:
+                    break
+                f = round(a.frequency_hz + width * frac, 1)
+                if f - a.frequency_hz < 1.0 or b.frequency_hz - f < 1.0:
+                    continue
+                if self.enqueue(f):
+                    self.refine_probe_count += 1
+                    added += 1
+            if added:
+                self._rounds_per_bracket[key] = rounds + 1
+
+        if len(self.test_queue) > initial_len:
+            return "CONTINUE", "REFINEMENT_ADDED", len(self.test_queue) - initial_len
+
+        self._complete = True
+        return "COMPLETE", "SCAN_DONE", 0
+
+    # --------------------------------------------------------------- regions
+    def build_regions(self, controller: Optional[DiagnosticController] = None) -> List[Region]:
+        """
+        Convert contiguous NOT-GOOD probe runs into Region objects with
+        bracket-based boundary estimates (arithmetic midpoints of the final
+        GOOD/NOT-GOOD pairs — the scan grid is linear, not logarithmic).
+        score_region() is applied afterwards by the caller for confidences.
+        """
+        rated = sorted(
+            [m for m in self.active_measurements if not m.input_error],
+            key=lambda x: x.frequency_hz
+        )
+        anchor = self.scan_anchor()
+
+        regions: List[Region] = []
+        runs: List[List[Measurement]] = []
+        current: List[Measurement] = []
+        for m in rated:
+            if not self._is_good(m, anchor):
+                current.append(m)
+            elif current:
+                runs.append(current)
+                current = []
+        if current:
+            runs.append(current)
+
+        for idx, pts in enumerate(runs):
+            f_low = min(p.frequency_hz for p in pts)
+            f_high = max(p.frequency_hz for p in pts)
+            center = math.sqrt(f_low * f_high)
+            min_q = min(p.quality for p in pts)
+            local_base = anchor
+            worst_pt = min(pts, key=lambda p: (p.quality, -(local_base - p.quality), p.frequency_hz))
+            avg_q = round(sum(p.quality for p in pts) / float(len(pts)), 1)
+
+            prev_good = next(
+                (m.frequency_hz for m in reversed(rated)
+                 if m.frequency_hz < f_low and self._is_good(m, anchor)),
+                None
+            )
+            next_good = next(
+                (m.frequency_hz for m in rated
+                 if m.frequency_hz > f_high and self._is_good(m, anchor)),
+                None
+            )
+
+            if prev_good is not None:
+                start_est = round((prev_good + f_low) / 2.0, 1)
+                lower_open = False
+            else:
+                start_est = f_low
+                lower_open = True
+            if next_good is not None:
+                end_est = round((f_high + next_good) / 2.0, 1)
+                upper_open = False
+            else:
+                end_est = f_high
+                upper_open = True
+            if end_est < start_est:
+                start_est, end_est = end_est, start_est
+
+            low_unc = ((f_low - start_est) / center * 100.0) if not lower_open else ((f_low - self.f_start) / center * 100.0)
+            high_unc = ((end_est - f_high) / center * 100.0) if not upper_open else ((self.f_end - f_high) / center * 100.0)
+            unc_pct = min(50.0, max(3.0, round(max(low_unc, high_unc), 1)))
+
+            bad_count = sum(1 for p in pts if p.quality <= 2.0 or not p.heard)
+            borderline_count = len(pts) - bad_count
+
+            regions.append(Region(
+                region_id=f"scan_{self.channel}_{idx + 1}",
+                channel=self.channel,
+                f_low=f_low,
+                f_high=f_high,
+                center_frequency=center,
+                min_quality=min_q,
+                baseline_quality=local_base,
+                depth=max(0.0, local_base - min_q),
+                effective_bad_count=float(bad_count) + 0.5 * float(borderline_count),
+                anomaly_confidence=0,
+                hardware_confidence=0,
+                category=RegionCategory.PERCEIVED_ANOMALY_MEDIUM_CONFIDENCE,
+                evidence="",
+                worst_frequency=worst_pt.frequency_hz,
+                avg_quality=avg_q,
+                severity="Uncertain",
+                uncertainty_pct=unc_pct,
+                start_estimate=start_est,
+                end_estimate=end_est,
+                lower_boundary_open=lower_open,
+                upper_boundary_open=upper_open,
+                is_point_anomaly=(len(pts) == 1),
+                points=list(pts)
+            ))
+
+        return regions

@@ -1,29 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 from PyInstaller.utils.hooks import collect_all
 
-# SPECPATH is the directory containing this spec file, so the spec is
-# reproducible on any machine instead of hardcoding C:/Users/... paths.
-_base = SPECPATH
-
-datas = [
-    (os.path.join(_base, 'fonts'), 'fonts'),
-    (os.path.join(_base, 'assets'), 'assets'),
-]
+datas = [('C:/Users/KIIT/Desktop/Volume/freqchecker/fonts', 'fonts'), ('C:/Users/KIIT/Desktop/Volume/freqchecker/assets', 'assets')]
 binaries = []
 hiddenimports = ['PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'PySide6.QtSvg', 'icons', 'fx_theme', 'numpy']
 tmp_ret = collect_all('sounddevice')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-try:
-    import soundfile  # noqa: F401
-    tmp_ret = collect_all('soundfile')
-    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-except ImportError:
-    pass
+tmp_ret = collect_all('soundfile')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    [os.path.join(_base, 'app.py')],
+    ['C:/Users/KIIT/Desktop/Volume/freqchecker/app.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -56,5 +44,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[os.path.join(_base, 'assets', 'app-icon.ico')],
+    icon=['C:/Users/KIIT/Desktop/Volume/freqchecker/assets/app-icon.ico'],
 )

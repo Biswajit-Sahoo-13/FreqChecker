@@ -63,6 +63,14 @@ $$f_{\text{end\_est}} = \sqrt{f_{\text{bad\_last}} \times f_{\text{good\_above}}
      - Symmetrical dual-channel dip $\rightarrow \times 0.45$ (Identifies DSP/room standing waves)
      - Asymmetrical single-channel dip $\rightarrow \times 1.15$ (Identifies physical speaker driver fault)
 
+### 1.9 Range Scan Boundary Refinement (v1.5)
+- **Band**: user-selected `20 – 20 000 Hz`. Ceiling rationale: 48 kHz shared-mode output caps clean tones at ≈ 22 kHz (0.95 × Nyquist), laptop drivers roll off above ~15–20 kHz, and human hearing ends ~16–20 kHz — higher frequencies would be unproducible or inaudible on target hardware.
+- **Coarse pass**: evenly spaced linear probes, $\text{step} = \max\left(\frac{f_{end}-f_{start}}{23},\ 5\text{ Hz}\right)$, ≤ 24 probes, endpoints inclusive.
+- **Classification**: anchor-relative (`effective_classification`) with a scan-personal anchor: median quality of heard probes once ≥ 4 exist, else the 8.0 nominal.
+- **Refinement**: every adjacent GOOD↔NOT-GOOD bracket receives probes at its 25/50/75% points; brackets close when width ≤ 10 Hz (**±5 Hz boundary accuracy**). Caps: 7 rounds per bracket, 60 refine probes total ⇒ worst case ~84 tones and guaranteed termination for arbitrary rater sequences.
+- **Band-silent shortcut**: after the coarse pass, < 20% effectively-GOOD probes ⇒ the channel finalizes as a global `BAND_SILENT` guidance state ("verify volume/output device and rating anchor — not a speaker fault verdict"); no region is emitted and no refinement runs. This prevents a muted-output or low-rating session from being scored as a high-confidence false anomaly.
+- **Boundaries**: arithmetic midpoints of the final closing pairs (the scan grid is linear); `uncertainty_pct = max side-gap / center × 100`, clamped 3–50%. Regions then flow through standard `score_region` confidence math with evidence prefixed `range scan: N probes, boundary ±X Hz`.
+
 ---
 
 ## 2. Technology Stack & Concurrency Architecture
