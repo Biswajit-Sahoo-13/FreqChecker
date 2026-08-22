@@ -12,7 +12,7 @@ FreqChecker is built around rigorous psychoacoustic and signal-processing princi
 - **Principle**: Human hearing and speaker acoustics operate on a logarithmic scale. A linear frequency sweep (e.g., 100, 200, 300 Hz) skips entire octaves at the low end and wastes dozens of tests in high-frequency regions.
 - **Implementation**: FreqChecker uses standard ISO 1/3-octave center frequencies:
   $$\{63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000\} \text{ Hz}$$
-- **Efficiency**: Reduces full-spectrum coarse scanning to just **25 points per channel** (or **7 points** in Quick Mode) instead of hundreds in a linear scan.
+- **Efficiency**: Reduces full-spectrum coarse scanning to just **25 points per channel** (or **6 points** in Quick Mode — 7 with the optional sub-bass toggle) instead of hundreds in a linear scan.
 
 ### 1.2 Structural Bass Roll-Off Predicate
 - **Problem**: Small laptop speaker drivers physically roll off below $\sim 150 - 250 \text{ Hz}$. Naive frequency-band checks either trigger false alarms or misclassify deep roll-offs.
@@ -47,7 +47,12 @@ $$f_{\text{start\_est}} = \sqrt{f_{\text{good\_below}} \times f_{\text{bad\_firs
 $$f_{\text{end\_est}} = \sqrt{f_{\text{bad\_last}} \times f_{\text{good\_above}}}$$
 - If no good anchor exists at grid edges, boundaries are marked as `lower_boundary_open` or `upper_boundary_open`.
 
-### 1.7 Dual Confidence Scoring
+### 1.7 Global Abort & Early Dead-Output Guard
+- **Three-way abort** at the coarse→refine transition: `GLOBAL_OUTPUT_FAILURE` (< 25% of mid/high coarse tones heard), `GLOBAL_OUTPUT_UNCERTAIN` (25–75% heard with poor quality), and `RATING_SCALE_LOW`.
+- **Anchor-relative scale check**: `RATING_SCALE_LOW` fires only when the personal anchor is $\le 4.0$ or *no* point is effectively GOOD relative to that anchor. A rater whose personal scale never reaches 7 but who anchors consistently (e.g. uniform 6.5 with dips still visible relative to their own baseline) is **not** aborted — anchor-relative classification is the point of the calibration tone.
+- **Early guard (mid-coarse)**: after 6 rated coarse tones above 200 Hz with *none* heard, the channel aborts immediately as `GLOBAL_OUTPUT_FAILURE` instead of dragging the user through the remaining coarse pass. Sub-bass tones (≤ 200 Hz) and control tones never count toward this guard, so expected low-frequency roll-off cannot trigger it.
+
+### 1.8 Dual Confidence Scoring
 1. **Anomaly Confidence ($0 - 95\%$)**:
    $$\text{AnomalyConf} = 35\% \cdot S_{\text{consistency}} + 25\% \cdot S_{\text{depth}} + 20\% \cdot S_{\text{retest}} + 10\% \cdot S_{\text{control}} + 10\% \cdot S_{\text{plausibility}}$$
 2. **Hardware Attribution Confidence ($0 - 95\%$)**:

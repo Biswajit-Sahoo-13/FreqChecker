@@ -141,7 +141,10 @@ class DiagnosticController:
         Abort refinement with 3-way diagnosis:
         - GLOBAL_OUTPUT_FAILURE: heard_ratio < 0.25 or severe driver/mute crash.
         - GLOBAL_OUTPUT_UNCERTAIN: 0.25 <= heard_ratio < 0.75 with poor quality (< 3.5).
-        - RATING_SCALE_LOW: heard_ratio >= 0.75, anchor <= 4.0 or no GOOD points, low average, and NO localized dips.
+        - RATING_SCALE_LOW: heard_ratio >= 0.75, anchor <= 4.0 or no effectively-GOOD points, low average, and NO localized dips.
+        Classification is anchor-relative: a rater whose personal scale never uses 7+ but who anchors
+        consistently (e.g. uniform 6.5 with dips detectable relative to their own baseline) must NOT
+        be aborted, so only the effective (anchor-relative) GOOD count participates in this decision.
         If localized dips exist even under conservative ratings, allows testing to proceed to catch defects.
         """
         mid_high_coarse = [
@@ -155,7 +158,6 @@ class DiagnosticController:
         heard_ratio = heard_count / float(len(mid_high_coarse))
         avg_mid_high = sum(m.quality for m in mid_high_coarse) / float(len(mid_high_coarse))
 
-        raw_good_count = sum(1 for m in mid_high_coarse if m.classification == Classification.GOOD)
         anchor = cls.rating_anchor(measurements)
         good_count = sum(1 for m in mid_high_coarse if cls.effective_classification(m, anchor) == Classification.GOOD)
         bad_count = sum(1 for m in mid_high_coarse if cls.effective_classification(m, anchor) == Classification.BAD)
@@ -167,7 +169,7 @@ class DiagnosticController:
         if 0.25 <= heard_ratio < 0.75 and avg_mid_high < 3.5:
             return True, "GLOBAL_OUTPUT_UNCERTAIN"
 
-        if heard_ratio >= 0.75 and (anchor <= 4.0 or raw_good_count == 0 or good_count == 0):
+        if heard_ratio >= 0.75 and (anchor <= 4.0 or good_count == 0):
             # Check if there is a strong localized dip relative to rater's own cluster
             qualities = [m.quality for m in mid_high_coarse]
             med_q = float(np.median(qualities))
@@ -183,6 +185,22 @@ class DiagnosticController:
             return True, "GLOBAL_OUTPUT_FAILURE"
 
         return False, ""
+
+    @staticmethod
+    def check_early_output_failure(measurements: List[Measurement], min_points: int = 6) -> bool:
+        """
+        Mid-coarse dead-output guard: True when at least `min_points` coarse tones
+        above 200 Hz have been rated and none were heard. The midrange is where
+        even tiny laptop drivers are plainly audible, so hearing none of it means
+        the output chain is muted/dead long before the full coarse pass finishes.
+        """
+        rated = [
+            m for m in measurements
+            if m.stage == Stage.COARSE and m.frequency_hz > 200.0 and not m.input_error
+        ]
+        if len(rated) < min_points:
+            return False
+        return not any(m.heard for m in rated)
 
     @staticmethod
     def check_control_stability(measurements: List[Measurement]) -> bool:
@@ -768,13 +786,23 @@ class TestScheduler:
     def undo_last_measurement(self):
         """
         Step back one rating: drop the newest measurement and rewind the queue
-        cursor so the same test item is presented again.
+        cursor so the same test item is presented again. Also reverts the side
+        effects the measurement may have recorded: a retest resolved its original
+        coarse point (input_error / verified_suspicious flags); restore the
+        pre-resolution state so the original is judged again. Refine budget is
+        NOT refunded — it is consumed when the item is enqueued, and the queue
+        item survives undo, so the slot is re-rated without a new charge.
         """
         if not self.active_measurements or self.current_idx <= 0:
             return
         m = self.active_measurements.pop()
         self.pending_freqs.add(round(float(m.frequency_hz), 1))
         self.current_idx -= 1
+        if m.is_retest:
+            for orig in self.active_measurements:
+                if orig.stage == Stage.COARSE and abs(orig.frequency_hz - m.frequency_hz) < 1.0:
+                    orig.input_error = False
+                    orig.verified_suspicious = False
 
     def start_channel(self, channel: str):
         """

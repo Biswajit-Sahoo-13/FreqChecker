@@ -9,7 +9,7 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-PySide6-41CD52?logo=qt&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20WASAPI-0078D4">
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
+  <img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-green">
   <img alt="Build" src="https://img.shields.io/badge/build-passing-52c41a">
 </p>
 <p align="center">
@@ -22,8 +22,22 @@
 
 ---
 
+## ⬇️ Download the Stable Release
+
+> ** ➜ [github.com/Biswajit-Sahoo-13/FreqChecker/releases/latest](https://github.com/Biswajit-Sahoo-13/FreqChecker/releases/latest)**
+
+1. Open the **[Latest Release](https://github.com/Biswajit-Sahoo-13/FreqChecker/releases/latest)** page.
+2. Under **Assets**, download **`freqchecker.exe`** (~58 MB, single file, 64-bit).
+3. Double-click to run — **no installation, no Python, no dependencies**. Windows SmartScreen may warn about unsigned executables; click *More info → Run anyway* if you trust the source.
+4. Optional: verify the file against the `SHA-256` checksum published with the release (PowerShell: `Get-FileHash .\freqchecker.exe`).
+
+Older versions and release notes: see **[all releases](https://github.com/Biswajit-Sahoo-13/FreqChecker/releases)**. To build the exe yourself from source instead, see [Recompile Executable](#4-recompile-executable) below.
+
+---
+
 ## 📚 Table of Contents
 
+- [Download the Stable Release](#-download-the-stable-release)
 - [Technical Specs](#-technical-specifications--low-end-pc-optimization)
 - [Key Highlights](#-key-highlights)
 - [Technology Stack](#%EF%B8%8F-technology-stack)
@@ -87,9 +101,9 @@ FreqChecker/                          # ← https://github.com/Biswajit-Sahoo-13
     ├── fx_theme.py                    # FxSound Design Tokens (27), Dual-Theme QSS & Font Loader
     ├── icons.py                       # Vector SVG Icon Renderer (no platform emoji)
     ├── fonts/Manrope.ttf              # Bundled UI Typeface
-    ├── test_diagnostic.py             # Automated Unit Test Suite (44 tests, 500-iter fuzz + oracle)
+    ├── test_diagnostic.py             # Automated Unit Test Suite (50 tests, 500-iter fuzz + oracle)
     ├── build_exe.py                   # Optimized Selective PyInstaller Packaging Script
-    ├── requirements.txt               # Pinned Dependency Manifest
+    ├── requirements.txt               # Dependency Manifest (compatible version ranges)
     ├── TECH_SPECS_AND_OPTIMIZATION.md # Comprehensive Algorithms & Performance Specs
     └── README.md                      # This file
 ```
@@ -166,18 +180,18 @@ freqchecker.exe --framed
 
 ## 🔍 Features
 
-- **Guided adaptive diagnostic** — 1/3-octave coarse grid (25 detailed: 63–16k / 6 quick: 250–8k, laptop-friendly), periodic `1 kHz` reference controls (every 8 detailed / 3 quick), isolated retests, bounded bisection to `±1/12` octave, `global_refine_count < 24`.
+- **Guided adaptive diagnostic** — 1/3-octave coarse grid (25 detailed: 63–16k / 6 quick: 250–8k, laptop-friendly), periodic `1 kHz` reference controls (every 8 detailed / 3 quick), isolated retests, bounded bisection to `±1/12` octave, `global_refine_count < 24`, and an **early dead-output abort** (6 unheard midrange tones ⇒ `GLOBAL_OUTPUT_FAILURE` without finishing the whole coarse pass).
 - **Quick vs Detailed** — Quick starts at **250 Hz** to skip inaudible sub-bass on small drivers; `Include sub-bass (63–200 Hz)` toggle restores `125 Hz` for headphones/large monitors. Detailed always full-range with roll-off-aware scoring.
 - **Blind Mode** — hide tone frequencies until rated to reduce expectation bias.
 - **Undo (Z)** — step back one rating and replay the same tone; `R` replay, `Y/N`, `0–9`/`T=10` one-touch.
-- **Live 9-band spectrum monitor** — **genuine Hann-windowed FFT** (`256` Hann, `rfft`, `20–20000` band power) of the *playing buffer*, not a simulation; 30 FPS mirrored scroll (`4px bar / 9.55px pitch`), crimson `→` cyan gradient, peak caps, idle desaturation.
+- **Live 9-band spectrum monitor** — **genuine Hann-windowed FFT** (`256` Hann, `rfft`, `20–20000` band power) of the *playing buffer*, not a simulation; 30 FPS mirrored scroll (`4px bar / 9.1px pitch`), crimson `→` cyan gradient, peak caps, idle desaturation.
 - **Log sweep with anomaly marking** — `100 Hz → 10 kHz` 10–60 s `QTimer 50 ms`, `Space` to mark, `35 ms` latency compensation, then **Retest Marked Frequencies** through the guided flow.
 - **Manual tone generator** — `Sine / Triangle / Pink` (`1/√f` FFT-shaped), `20–20000 Hz` log-mapped slider `f=20·(1000)^(pos/1000)`, `0.5–10 s`, `L/R/Both` with raised-cosine fades.
-- **Music A/B mode** — load `WAV/FLAC/OGG/MP3/AIFF` via `soundfile`, `60→8 ms` fades, `L/R/Both` instant channel switch, `0–100%` volume, seek permille, `OutputStream`-style.
+- **Music A/B mode** — load `WAV/FLAC/OGG/MP3/AIFF` via `soundfile` (10-minute track cap for low-RAM safety, bounded 5-minute playback windows), `60→8 ms` fades, `L/R/Both` instant channel switch, `0–100%` volume, seek permille, `OutputStream`-style.
 - **Stress replay** — replay worst point at **+75%** (`peak 0.7`) to distinguish level-dependent distortion vs true dip.
 - **Results dashboard** — dual-channel **log-frequency plot** `50–18000 Hz` (major `63–16k`, minor grid, `QPen` dashed), shaded anomaly (red `35α` / roll-off grey), hover `QToolTip` + `click-to-replay`, filter `Both/Left/Right`.
 - **Premium report** — export **`Premium Report (.html)`** via `Session.generate_html_report()` — gradient header, KPI grid, channel cards with severity pills + confidence bars, cross-channel differential, print-ready `@media print`, also `CSV (raw)` + `JSON (session)` + `Text` fallback; in-app `QTextEdit` preview via `setHtml`.
-- **Partial-save protection** — stopping mid-session or `closeEvent` on `PAGE_TESTING` offers `Save Partial / Discard / Cancel` to `saved_sessions/session_*.json`; `load Previous Session JSON` restores.
+- **Partial-save protection** — stopping mid-session or `closeEvent` on `PAGE_TESTING` offers `Save Partial / Discard / Cancel` to `%APPDATA%\FreqChecker\saved_sessions\session_*.json` (falls back to `saved_sessions/` beside the exe when APPDATA is unavailable); `load Previous Session JSON` restores.
 
 ---
 
@@ -312,13 +326,14 @@ A: Results → `Export Premium Report (.html)` → open in Edge/Chrome → `Ctrl
 | **2 — Stability** | `generation` thread guard, `QTimer` singleShot, partial-save, `faulthandler` | ✅ Done |
 | **3 — UX** | Frameless `38px` title (`— □ X`), logo `→ Home`, `Back` history, responsive `QScrollArea`, single `Play/Stop` toggle, `Z` undo | ✅ Done |
 | **4 — Performance** | `58.17 MB` `—onefile`, `960×640` min, `30 FPS` only while playing | ✅ Done |
-| **5 — Release** | `44` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
+| **5 — Release** | `50` tests (`500` fuzz + `5` oracles), `build_exe.py` gated, `freqchecker_crash.log` | ✅ Done |
 | **6 — Future** | Optional: mic-calibrated measurement, `OutputStream` gapless A/B, per-channel EQ overlay, `MuseScore` export | 🔜 Planned |
 
 ---
 
 ## 📝 Changelog
 
+- **2026-08-22 — v1.3** — Audit hardening: `Z`-undo now reverts retest resolutions (no silent data whitewash), anchor-relative `RATING_SCALE_LOW` (consistent conservative raters no longer falsely aborted), mid-coarse early dead-output abort, music mode RAM bounds (10-min cap + 5-min windows + single resident copy), Back button stops playback, blind mode hides the live plot, crash log + partial saves relocated to `%APPDATA%\FreqChecker` with size-capped log rotation, path-portable `freqchecker.spec`. 50 tests.
 - **2026-08-21 — v1.2** — FxSound tokens, Manrope, `Hann FFT` visualizer, `Quick 250 Hz` + sub-bass toggle, `Z` undo, `Back/Home`, responsive splitters + scroll, `Premium HTML` report, frameless maximize.
 - **2026-08-14 — v1.1** — Dual confidence, cross-channel differential, bisection `1/12` octave, outlier retest.
 - **2026-08-10 — v1.0** — Initial `1/3 octave` adaptive diagnostic, WASAPI, log plot.
@@ -329,7 +344,7 @@ A: Results → `Export Premium Report (.html)` → open in Edge/Chrome → `Ctrl
 
 | Symptom | Fix |
 |---|---|
-| **Crash** | Check `freqchecker_crash.log` next to exe/script (`faulthandler` + `sys.excepthook`). |
+| **Crash** | Check `freqchecker_crash.log` in `%APPDATA%\FreqChecker\` (or beside the exe/script as fallback) — `faulthandler` + `sys.excepthook`, auto-rotated at 1 MB. |
 | **No devices listed** | Windows Settings → Privacy → Microphone → *Allow desktop apps*; disable Enhancements / Spatial sound. |
 | **Music mode greyed** | `pip install soundfile` — optional; app runs without it. |
 | **Build fails / exe locked** | Close running `freqchecker.exe` (file locked) then `python build_exe.py`. |
@@ -369,6 +384,6 @@ Please keep `correctness > reliability > performance > usability > maintainabili
 
 ## 📜 License
 
-MIT — see `LICENSE` if present. FxSound-inspired palette and Manrope typeface are used under their respective licenses; no FxSound assets are copied.
+Apache License 2.0 — see [`LICENSE`](./LICENSE). The bundled **Manrope** typeface (`fonts/Manrope.ttf`) is © Mikhail Sharanda, used under the [SIL Open Font License 1.1](./fonts/OFL.txt). FxSound-inspired palette only — no FxSound assets are copied.
 
 > Built as a small, technically serious diagnostic utility — not an oversized demo.

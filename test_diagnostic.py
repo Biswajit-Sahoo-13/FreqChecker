@@ -117,7 +117,7 @@ class TestDiagnosticAlgorithm(unittest.TestCase):
         Verify the 3 global abort outcomes:
         - GLOBAL_OUTPUT_FAILURE (< 25% heard or driver dead)
         - GLOBAL_OUTPUT_UNCERTAIN (25%-75% heard with low quality)
-        - RATING_SCALE_LOW (>= 75% heard, average low, no GOOD points, no localized dips)
+        - RATING_SCALE_LOW (>= 75% heard, anchor <= 4.0 or no effectively-GOOD points, no localized dips)
         """
         # 1. Failure (all dead)
         dead = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=False, clarity=0) for f in [250.0, 500.0, 1000.0, 2000.0, 4000.0]]
@@ -133,9 +133,44 @@ class TestDiagnosticAlgorithm(unittest.TestCase):
         ]
         self.assertEqual(self.controller.check_global_abort(uncertain), (True, "GLOBAL_OUTPUT_UNCERTAIN"))
 
-        # 3. Rating Scale Low (all heard, quality = 4-5 uniformly without localized dips)
-        rating_low = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=True, clarity=5) for f in [250.0, 500.0, 1000.0, 2000.0, 4000.0]]
+        # 3. Rating Scale Low (all heard, anchor = 4.0 uniformly — personal scale too low to be usable)
+        rating_low = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=True, clarity=4) for f in [250.0, 500.0, 1000.0, 2000.0, 4000.0]]
         self.assertEqual(self.controller.check_global_abort(rating_low), (True, "RATING_SCALE_LOW"))
+
+    def test_uniform_mid_scale_rater_not_aborted(self):
+        """
+        Regression: a rater whose personal scale never reaches 7 but who anchors
+        consistently (uniform 5 or 6, heard everywhere, no dips) must NOT be
+        globally aborted — anchor-relative classification is the whole point of
+        the calibration anchor. Only scales anchored at <= 4.0 are unusable.
+        """
+        for clarity in (5, 6):
+            meas = [
+                Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=True, clarity=clarity)
+                for f in [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+            ]
+            is_abort, reason = self.controller.check_global_abort(meas)
+            self.assertFalse(is_abort, f"uniform rater at clarity={clarity} wrongly aborted ({reason})")
+
+    def test_early_output_failure_guard(self):
+        """
+        Mid-coarse dead-output guard: fires only after >= 6 rated mid/high coarse
+        tones with none heard; a partial set, a single heard tone, or sub-bass
+        tones must not trigger it.
+        """
+        freqs = [250.0, 315.0, 400.0, 500.0, 630.0, 800.0]
+        five_unheard = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=False, clarity=0) for f in freqs[:5]]
+        self.assertFalse(DiagnosticController.check_early_output_failure(five_unheard))
+
+        six_unheard = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=False, clarity=0) for f in freqs]
+        self.assertTrue(DiagnosticController.check_early_output_failure(six_unheard))
+
+        one_heard = list(six_unheard)
+        one_heard[2] = Measurement(frequency_hz=freqs[2], channel="left", stage=Stage.COARSE, heard=True, clarity=7)
+        self.assertFalse(DiagnosticController.check_early_output_failure(one_heard))
+
+        bass_only = [Measurement(frequency_hz=f, channel="left", stage=Stage.COARSE, heard=False, clarity=0) for f in [63.0, 80.0, 100.0, 125.0, 160.0, 200.0]]
+        self.assertFalse(DiagnosticController.check_early_output_failure(bass_only))
 
     def test_global_abort_retains_strong_local_dips_under_low_ratings(self):
         """
@@ -772,6 +807,102 @@ class TestFxSoundUiAndNewFeatures(unittest.TestCase):
         again = Measurement(frequency_hz=current["freq"], channel="left", stage=current["stage"], heard=True, clarity=9)
         sched.record_measurement(again, controller)
         self.assertEqual(len(sched.active_measurements), 2)
+
+    def test_undo_reverts_isolated_retest_resolution(self):
+        """
+        Regression: undoing a retest must restore the original coarse point's
+        input_error / verified_suspicious flags to their pre-resolution state,
+        otherwise a clean retest permanently whitewashes the original even
+        after the user takes the retest back.
+        """
+        sched = TestScheduler(mode="detailed")
+        controller = DiagnosticController(mode="detailed")
+        sched.start_channel("left")
+        # Rate the whole coarse pass; 800 Hz gets a bad (misclick) score
+        while sched.get_current_test() is not None:
+            item = sched.get_current_test()
+            clarity = 1 if (item["stage"] == Stage.COARSE and abs(item["freq"] - 800.0) < 1.0) else 9
+            m = Measurement(
+                frequency_hz=item["freq"], channel="left", stage=item["stage"],
+                heard=True, clarity=clarity, is_control=item.get("is_control", False)
+            )
+            sched.record_measurement(m, controller)
+        # Phase transition enqueues the isolated retest for 800 Hz
+        action, reason, _ = sched.handle_phase_transition(controller)
+        self.assertEqual(action, "CONTINUE")
+        self.assertEqual(reason, "RETESTS_ADDED")
+        retest_item = sched.get_current_test()
+        self.assertEqual(retest_item["stage"], Stage.RETEST)
+        # Clean retest -> original 800 Hz flagged as input_error (misclick)
+        retest = Measurement(frequency_hz=retest_item["freq"], channel="left", stage=Stage.RETEST, heard=True, clarity=9, is_retest=True)
+        sched.record_measurement(retest, controller)
+        orig = next(m for m in sched.active_measurements if m.stage == Stage.COARSE and abs(m.frequency_hz - 800.0) < 1.0)
+        self.assertTrue(orig.input_error)
+        # Undo the retest: the original must be re-evaluated, not stay whitewashed
+        sched.undo_last_measurement()
+        self.assertFalse(orig.input_error)
+        self.assertFalse(orig.verified_suspicious)
+        self.assertEqual(len(sched.active_measurements), 28)  # 25 coarse + 3 controls, retest popped
+        current = sched.get_current_test()
+        self.assertEqual(current["stage"], Stage.RETEST)
+
+    def test_undo_refine_keeps_bisection_budget(self):
+        """
+        Regression: refine budget is consumed at enqueue time and the queue item
+        survives undo, so undoing a REFINE measurement must not refund (and thus
+        double-charge later, loosening the 24-test cap).
+        """
+        sched = TestScheduler(mode="detailed")
+        sched.start_channel("left")
+        sched.test_queue.clear()
+        sched.pending_freqs.clear()
+        sched.global_refine_count = 5
+        sched.enqueue(550.0, Stage.REFINE)
+        item = sched.get_current_test()
+        self.assertIsNotNone(item)
+        m = Measurement(frequency_hz=item["freq"], channel="left", stage=Stage.REFINE, heard=True, clarity=8)
+        sched.record_measurement(m)
+        self.assertEqual(sched.global_refine_count, 5)  # record alone does not consume budget
+        sched.undo_last_measurement()
+        self.assertEqual(sched.global_refine_count, 5)  # undo must not refund either
+        self.assertEqual(sched.get_current_test()["stage"], Stage.REFINE)
+
+    def test_music_duration_cap(self):
+        """
+        The music loader must reject files longer than the 10-minute safety cap
+        (low-RAM protection) and accept files within it.
+        """
+        try:
+            import soundfile as sf
+        except ImportError:
+            self.skipTest("soundfile not installed")
+        import tempfile, os as _os
+        engine = AudioEngine(sample_rate=48000)
+        sr = 8000
+        with tempfile.TemporaryDirectory() as tmp:
+            long_path = _os.path.join(tmp, "too_long.wav")
+            sf.write(long_path, np.zeros(int(601.0 * sr), dtype=np.float32), sr)
+            with self.assertRaises(ValueError):
+                engine.load_music_file(long_path)
+            short_path = _os.path.join(tmp, "ok.wav")
+            sf.write(short_path, 0.1 * np.ones(int(5.0 * sr), dtype=np.float32), sr)
+            data, got_sr = engine.load_music_file(short_path)
+            self.assertEqual(got_sr, sr)
+            self.assertEqual(data.shape[1], 2)
+
+    def test_music_segment_bounded_window(self):
+        """
+        prepare_music_segment must never slice more than max_segment_s seconds,
+        so long tracks cannot allocate a full remaining-tail copy per play().
+        """
+        engine = AudioEngine(sample_rate=48000)
+        base = np.zeros((int(1.0 * 48000), 2), dtype=np.float32)  # 1 s track
+        seg = engine.prepare_music_segment(base, 0, "left", 0.6, max_segment_s=0.5)
+        self.assertLessEqual(len(seg), int(0.5 * 48000) + 1)
+        self.assertEqual(seg.shape[1], 2)
+        # Default window bound is 300 s
+        seg_default = engine.prepare_music_segment(base, 0, "both", 1.0)
+        self.assertEqual(len(seg_default), len(base))
 
     def test_session_sweep_marks_roundtrip(self):
         session = Session(session_id="sweep_marks_test", mode="sweep")

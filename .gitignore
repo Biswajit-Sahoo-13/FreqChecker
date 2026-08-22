@@ -23,7 +23,6 @@ venv.bak/
 build/
 dist/
 *.manifest
-*.spec
 freqchecker.exe
 *.exe
 

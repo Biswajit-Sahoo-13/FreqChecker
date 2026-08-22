@@ -294,13 +294,14 @@ class AudioEngine:
         """
         Load user music file (WAV, FLAC, OGG, MP3, etc.) using optional soundfile library.
         Returns float32 stereo array normalized to [-1.0, 1.0] and file's native sample rate.
-        Includes a 30-minute duration safety guard to protect low-RAM systems.
+        Includes a 10-minute duration safety guard: stereo float32 at 96 kHz would already
+        consume ~700 MB at 30 minutes, which thrashes 4 GB laptops.
         """
         import soundfile as sf
         info = sf.info(path)
-        # 30 minutes limit at native sample rate to avoid memory exhaustion
-        if info.duration > 1800.0:
-            raise ValueError(f"Audio file duration ({info.duration / 60.0:.1f} min) exceeds maximum safe limit of 30 minutes.")
+        # 10 minutes limit at native sample rate to avoid memory exhaustion on low-RAM systems
+        if info.duration > 600.0:
+            raise ValueError(f"Audio file duration ({info.duration / 60.0:.1f} min) exceeds maximum safe limit of 10 minutes.")
 
         data, sr = sf.read(path, dtype="float32", always_2d=True)
         if data.shape[1] == 1:
@@ -325,14 +326,19 @@ class AudioEngine:
         start_sample: int,
         channel: str,
         volume: float,
-        fade_ms: float = 8.0
+        fade_ms: float = 8.0,
+        max_segment_s: float = 300.0
     ) -> np.ndarray:
         """
         Slice and process music segment from start_sample with channel routing, volume scaling, and fade-in.
+        The slice is bounded to `max_segment_s` seconds so long tracks never allocate a
+        full remaining-tail copy on every play/seek/volume change; playback continues
+        seamlessly across consecutive windows.
         """
         start = max(0, min(start_sample, len(base) - 1))
-        # Single copy slice
-        seg = np.array(base[start:], dtype=np.float32, copy=True)
+        max_samples = max(1, int(max_segment_s * self.sample_rate))
+        # Single copy slice, window-bounded
+        seg = np.array(base[start:start + max_samples], dtype=np.float32, copy=True)
         if channel == "left":
             seg[:, 1] = 0.0
         elif channel == "right":

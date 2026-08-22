@@ -36,13 +36,38 @@ from fx_theme import DARK_THEME_QSS, LIGHT_THEME_QSS, get_fx_color
 from icons import get_svg_icon, get_svg_pixmap
 
 
+def _app_data_dir() -> Optional[str]:
+    """
+    Per-user writable data directory (%APPDATA%\\FreqChecker), or None when
+    unavailable. Used so logs and session files never depend on the install
+    directory being writable (e.g. under Program Files).
+    """
+    base = os.environ.get("APPDATA")
+    if not base:
+        return None
+    path = os.path.join(base, "FreqChecker")
+    try:
+        os.makedirs(path, exist_ok=True)
+        return path
+    except Exception:
+        return None
+
+
 def _setup_crash_logger():
     """Enable faulthandler and top-level excepthook to capture unhandled crashes to disk."""
     if getattr(sys, "frozen", False):
         app_dir = os.path.dirname(sys.executable)
     else:
         app_dir = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(app_dir, "freqchecker_crash.log")
+    data_dir = _app_data_dir() or app_dir
+    log_path = os.path.join(data_dir, "freqchecker_crash.log")
+
+    # Rotate: keep the log bounded instead of appending forever
+    try:
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 1_000_000:
+            os.replace(log_path, log_path + ".old")
+    except Exception:
+        pass
 
     try:
         if sys.stderr is not None:
@@ -316,6 +341,7 @@ class FreqCheckerApp(QMainWindow):
         
         # Music state
         self.music_original: Optional[Any] = None
+        self.music_file_path: Optional[str] = None
         self.music_file_sr: int = 48000
         self._music_cache: Optional[Any] = None
         self._music_cache_rate: int = 0
@@ -397,11 +423,17 @@ class FreqCheckerApp(QMainWindow):
         if not self.session:
             return None
         try:
-            if getattr(sys, "frozen", False):
-                base_dir = os.path.dirname(sys.executable)
+            # Prefer the per-user data dir; fall back to the install/script dir
+            # (portable use) when APPDATA is unavailable or read-only.
+            data_dir = _app_data_dir()
+            if data_dir is not None:
+                save_dir = os.path.join(data_dir, "saved_sessions")
             else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(base_dir, "saved_sessions")
+                if getattr(sys, "frozen", False):
+                    base_dir = os.path.dirname(sys.executable)
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                save_dir = os.path.join(base_dir, "saved_sessions")
             os.makedirs(save_dir, exist_ok=True)
             path = os.path.join(save_dir, f"session_{self.session.session_id}.json")
             with open(path, "w", encoding="utf-8") as f:
@@ -695,6 +727,12 @@ class FreqCheckerApp(QMainWindow):
         self._update_back_buttons()
 
     def _go_back(self):
+        # Leaving a page must never leave a tone running in the background
+        try:
+            self.audio_engine.stop_playback()
+            self.top_visualizer.stop_and_clear()
+        except Exception:
+            pass
         if hasattr(self, "_nav_history") and self._nav_history:
             prev = self._nav_history.pop()
             self._current_page = prev  # avoid double-push
@@ -1352,6 +1390,15 @@ class FreqCheckerApp(QMainWindow):
         )
         self.scheduler.record_measurement(m, self.controller)
         self.audio_engine.stop_playback()
+        # Dead-output guard: hearing none of the first rated midrange tones means
+        # the output chain is muted/dead — abort now instead of dragging the user
+        # through the entire coarse pass.
+        if (
+            not self.scheduler.manual_mode
+            and self.controller.check_early_output_failure(self.scheduler.active_measurements)
+        ):
+            self._finalize_channel(is_global_problem=True, global_problem_type="GLOBAL_OUTPUT_FAILURE")
+            return
         self._present_next_test()
 
     # =========================================================================
@@ -1905,6 +1952,7 @@ class FreqCheckerApp(QMainWindow):
         
         self._music_stop()
         self.music_original = data
+        self.music_file_path = path
         self.music_file_sr = sr
         self._music_cache = None
         self._music_cache_rate = 0
@@ -1922,6 +1970,16 @@ class FreqCheckerApp(QMainWindow):
     def _get_music_base(self):
         if self._music_cache is not None and self._music_cache_rate == self.audio_engine.sample_rate:
             return self._music_cache
+        # The native-rate buffer is freed after resampling to halve resident RAM;
+        # if the device sample rate changed, re-read the file from disk instead.
+        if self.music_original is None:
+            if not self.music_file_path:
+                return None
+            try:
+                self.music_original, self.music_file_sr = self.audio_engine.load_music_file(self.music_file_path)
+            except Exception as e:
+                self.lbl_music_status.setText(f"[Alert] Could not reload track after device change: {e}")
+                return None
         res = self.audio_engine.resample_linear(
             self.music_original,
             self.music_file_sr,
@@ -1929,6 +1987,8 @@ class FreqCheckerApp(QMainWindow):
         )
         self._music_cache = res
         self._music_cache_rate = self.audio_engine.sample_rate
+        if res is not self.music_original:
+            self.music_original = None  # keep only the resampled copy resident
         return res
 
     def _set_music_channel(self, ch: str):
@@ -1954,9 +2014,11 @@ class FreqCheckerApp(QMainWindow):
             self._music_play()
 
     def _music_play(self):
-        if self.music_original is None:
+        if self.music_original is None and self.music_file_path is None:
             return
         base = self._get_music_base()
+        if base is None:
+            return
         sr = self.audio_engine.sample_rate
         total_samples = len(base)
         start_sample = max(0, min(int(self.music_pos_sec * sr), total_samples - 1))
@@ -2014,6 +2076,18 @@ class FreqCheckerApp(QMainWindow):
         self.top_visualizer.stop_and_clear()
         if not ok and err_msg and was_active:
             self.lbl_music_status.setText(f"[Alert] Playback error: {err_msg}")
+            return
+        if not ok or not was_active:
+            return
+        # Segmented playback: a bounded window ended before the track end —
+        # continue seamlessly from the last tracked position.
+        if self.music_pos_sec < self._music_total_sec - 0.5:
+            self._music_play()
+        else:
+            # Track finished naturally: reset position so Play restarts from the top
+            self.music_pos_sec = 0.0
+            self.slider_music_pos.setValue(0)
+            self.lbl_music_pos.setText(f"0:00 / {_fmt_time(self._music_total_sec)}")
 
     def _on_music_timer(self):
         if not self._music_active or not self.music_playing:
@@ -2418,11 +2492,17 @@ class FreqCheckerApp(QMainWindow):
         self._update_pill_selection(-1)
         self.clarity_box.setVisible(False)
         
-        if self.current_channel == "left":
-            self.live_plot.set_data(self.scheduler.active_measurements, [])
+        if self.blind_mode:
+            # Blind mode: plotted points would leak the frequency via the log axis
+            self.live_plot.setVisible(False)
+            self.live_plot.set_data([], [])
         else:
-            left_done = self.session.channel_results.get("left", ChannelResult("left")).measurements
-            self.live_plot.set_data(left_done, self.scheduler.active_measurements)
+            self.live_plot.setVisible(True)
+            if self.current_channel == "left":
+                self.live_plot.set_data(self.scheduler.active_measurements, [])
+            else:
+                left_done = self.session.channel_results.get("left", ChannelResult("left")).measurements
+                self.live_plot.set_data(left_done, self.scheduler.active_measurements)
         self._replay_current_tone()
 
     def _replay_current_tone(self):
